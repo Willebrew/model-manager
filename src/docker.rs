@@ -148,7 +148,10 @@ pub async fn load(docker: &Docker, model: &ModelDef) -> Result<()> {
     let host_config = HostConfig {
         network_mode: Some("host".to_string()),
         binds: Some(binds),
-        runtime: Some("nvidia".to_string()),
+        // GPU access via device requests == `--gpus all` (default runc runtime
+        // + NVIDIA hook). We deliberately do NOT set runtime="nvidia": the
+        // legacy runtime combined with device injection breaks vLLM CUDA-graph
+        // capture (cudaErrorNotPermitted).
         // vLLM's multiprocessing needs a shared IPC namespace and unlimited
         // locked memory; harmless for llama.cpp.
         ipc_mode: Some("host".to_string()),
