@@ -99,6 +99,8 @@
   .boot input:checked::after { left: 15px; }
 
   .empty { padding: 60px 10px; text-align: center; color: var(--muted); }
+  .footer { margin: 34px 0 40px; display: flex; justify-content: flex-end; }
+  .footer .link { font-size: 12px; color: var(--faint); }
 
   /* modal */
   .overlay { position: fixed; inset: 0; background: rgba(20,18,12,.4); display: none;
@@ -138,7 +140,6 @@
   <span class="ver mono" id="host"></span>
   <span class="grow"></span>
   <button class="solid" id="addBtn">Add model</button>
-  <button class="icon" id="logoutBtn" title="Forget token">⎋</button>
 </div></header>
 
 <div class="wrap">
@@ -155,6 +156,7 @@
 
   <div class="listhead"><span class="lbl">Models</span><span class="ct mono" id="count"></span></div>
   <div class="list" id="list"></div>
+  <div class="footer"><button class="link" id="logoutBtn">Forget token</button></div>
 </div>
 
 <!-- Add/Edit -->
