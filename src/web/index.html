@@ -1,6 +1,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Model Manager</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none'><path d='M4.5 19.5V6.5L12 13.5 19.5 6.5V19.5' stroke='%23888' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'/><circle cx='4.5' cy='6.5' r='2.2' fill='%23888'/><circle cx='19.5' cy='6.5' r='2.2' fill='%23888'/></svg>">
 <style>
   :root {
     --paper:#f4f3ef; --surface:#fbfaf7; --ink:#17150f; --muted:#6c685e; --faint:#9a958a;
@@ -30,7 +31,7 @@
   /* header */
   header { border-bottom: 1px solid var(--ink); background: var(--paper); position: sticky; top: 0; z-index: 10; }
   .bar { display: flex; align-items: center; gap: 14px; height: 60px; }
-  .mark { width: 15px; height: 15px; background: var(--ink); display: inline-block; }
+  .mark { width: 22px; height: 22px; color: var(--ink); display: block; flex: none; }
   .name { font-weight: 700; font-size: 15px; letter-spacing: -.2px; }
   .ver { font-size: 11px; color: var(--faint); letter-spacing: .3px; }
   .grow { flex: 1; }
@@ -139,7 +140,11 @@
 </style>
 
 <header><div class="wrap bar">
-  <span class="mark"></span>
+  <svg class="mark" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+    <path d="M4.5 19.5 V6.5 L12 13.5 L19.5 6.5 V19.5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle cx="4.5" cy="6.5" r="2.1" fill="currentColor"/>
+    <circle cx="19.5" cy="6.5" r="2.1" fill="currentColor"/>
+  </svg>
   <span class="name">Model Manager</span>
   <span class="ver mono" id="host"></span>
   <span class="grow"></span>
