@@ -113,7 +113,13 @@ pub async fn load(docker: &Docker, model: &ModelDef) -> Result<()> {
     // or override the command — only the explicit mounts + env are used.
     let mut binds: Vec<String> = Vec::new();
     let cmd: Option<Vec<String>> = if model.use_image_entrypoint {
-        None
+        // The image's entrypoint self-configures (from env). Pass extra_args as
+        // its arguments if any (e.g. a mode selector like "dflash").
+        if model.extra_args.is_empty() {
+            None
+        } else {
+            Some(model.extra_args.clone())
+        }
     } else {
         // Mount the model read-only at /model. If model_path is a directory
         // (e.g. a HuggingFace model) mount it directly; if it's a file (e.g. a
