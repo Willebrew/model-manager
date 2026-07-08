@@ -242,7 +242,7 @@ async fn get_state(State(state): State<SharedState>) -> impl IntoResponse {
     for def in models {
         let st = by_name.get(&crate::config::sanitize(&def.name));
         let running = st.map(|s| s.running).unwrap_or(false);
-        let estimate = memory::estimate(&def, overhead);
+        let estimate = memory::estimate(&def, overhead, mem.total_mib);
         let oom = memory::oom_check(estimate.total_mib, &mem, safety);
         let healthy = if running {
             model_healthy(&state, def.host_port).await
@@ -343,7 +343,7 @@ async fn estimate_model(
         }
     };
     let mem = snapshot(&state).await;
-    let estimate = memory::estimate(&def, overhead);
+    let estimate = memory::estimate(&def, overhead, mem.total_mib);
     let oom = memory::oom_check(estimate.total_mib, &mem, safety);
     Json(json!({"estimate": estimate, "oom": oom, "memory": mem})).into_response()
 }
@@ -371,7 +371,7 @@ async fn load_model(
     };
 
     let baseline = snapshot(&state).await;
-    let estimate = memory::estimate(&def, overhead);
+    let estimate = memory::estimate(&def, overhead, baseline.total_mib);
     let oom = memory::oom_check(estimate.total_mib, &baseline, safety);
 
     if oom.would_oom && !q.force {

@@ -195,6 +195,11 @@
       <input type="number" id="f_gpu" class="mono-in" value="0.90" step="0.05" min="0.1" max="1"></label>
     <label>Extra flags <span class="hint">— one token per line</span>
       <textarea id="f_extra" placeholder="--jinja&#10;-fa&#10;on"></textarea></label>
+    <label>Environment variables <span class="hint">— KEY=VALUE per line</span>
+      <textarea id="f_env" placeholder="MODEL_PATH=/model&#10;GPU_MEMORY_UTILIZATION=0.8"></textarea></label>
+    <label>Extra mounts <span class="hint">— host:container[:ro] per line</span>
+      <textarea id="f_mounts" placeholder="/home/you/.cache/huggingface:/root/.cache/huggingface"></textarea></label>
+    <label class="boot" style="margin:0"><input type="checkbox" id="f_entry"> Image provides its own entrypoint (configured via env vars)</label>
     <label class="boot" style="margin:0"><input type="checkbox" id="f_auto"> Start on boot</label>
   </div>
   <div class="foot"><button id="editCancel">Cancel</button><button class="solid" id="editSave">Save</button></div>
@@ -323,13 +328,19 @@ function openEdit(d){editing=d?d.name:null;$('editTitle').textContent=d?'Edit mo
   $('f_name').value=d?.name||'';$('f_name').disabled=!!d;$('f_desc').value=d?.description||'';$('f_path').value=d?.model_path||'';
   $('f_image').value=d?.image||'';$('f_port').value=d?.host_port??18080;$('f_ctx').value=d?.context??8192;
   $('f_ngl').value=d?.ngl??99;$('f_threads').value=d?.threads??20;$('f_kv').value=d?.kv_type||'f16';$('f_gpu').value=d?.gpu_mem_util??0.90;
-  $('f_extra').value=(d?.extra_args||[]).join('\n');$('f_auto').checked=d?.autostart||false;$('editOverlay').classList.add('show');}
+  $('f_extra').value=(d?.extra_args||[]).join('\n');
+  $('f_env').value=(d?.env||[]).join('\n');$('f_mounts').value=(d?.mounts||[]).join('\n');$('f_entry').checked=d?.use_image_entrypoint||false;
+  $('f_auto').checked=d?.autostart||false;$('editOverlay').classList.add('show');}
 $('addBtn').onclick=()=>openEdit(null);$('editCancel').onclick=()=>$('editOverlay').classList.remove('show');
 $('editSave').onclick=async()=>{const extra=$('f_extra').value.split(/\n+/).map(s=>s.trim()).filter(Boolean);
   const body={name:$('f_name').value.trim(),description:$('f_desc').value.trim(),engine:curEngine,model_path:$('f_path').value.trim(),
     image:$('f_image').value.trim(),host_port:parseInt($('f_port').value)||18080,context:parseInt($('f_ctx').value)||8192,
     ngl:parseInt($('f_ngl').value)||99,threads:parseInt($('f_threads').value)||20,kv_type:$('f_kv').value,
-    gpu_mem_util:parseFloat($('f_gpu').value)||0.90,extra_args:extra,autostart:$('f_auto').checked};
+    gpu_mem_util:parseFloat($('f_gpu').value)||0.90,extra_args:extra,
+    env:$('f_env').value.split(/\n+/).map(s=>s.trim()).filter(Boolean),
+    mounts:$('f_mounts').value.split(/\n+/).map(s=>s.trim()).filter(Boolean),
+    use_image_entrypoint:$('f_entry').checked,
+    autostart:$('f_auto').checked};
   if(!body.name||!body.model_path){toast('Name and model path required','err');return;}
   if(curEngine==='llamacpp'&&!body.image){toast('llama.cpp needs an image','err');return;}
   try{await api('/api/models',{method:'POST',body});$('editOverlay').classList.remove('show');toast('Saved');refresh();}catch(e){toast('Save failed','err');}};

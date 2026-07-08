@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 pub const LLAMA_SERVER_BIN: &str = "/opt/llama.cpp/build-cuda/bin/llama-server";
-const SHM_SIZE: i64 = 32 * 1024 * 1024 * 1024; // 32 GiB
+const SHM_SIZE: i64 = 64 * 1024 * 1024 * 1024; // 64 GiB
 
 pub fn connect() -> Result<Docker> {
     Docker::connect_with_local_defaults().context("connecting to Docker daemon (is it running, and are you in the `docker` group?)")
@@ -108,22 +108,34 @@ pub async fn load(docker: &Docker, model: &ModelDef) -> Result<()> {
         );
     }
 
-    // Mount the model read-only at /model. If model_path is a directory (e.g. a
-    // HuggingFace model for vLLM) mount it directly; if it's a file (e.g. a
-    // GGUF shard) mount its parent so all sibling shards are visible.
-    let path = Path::new(&model.model_path);
-    let (host_mount, model_ref) = if path.is_dir() {
-        (path.to_path_buf(), "/model".to_string())
+    // Assemble bind mounts and the container command. When the image supplies
+    // its own entrypoint (env-configured images), we don't add a /model mount
+    // or override the command — only the explicit mounts + env are used.
+    let mut binds: Vec<String> = Vec::new();
+    let cmd: Option<Vec<String>> = if model.use_image_entrypoint {
+        None
     } else {
-        let dir = path.parent().context("model_path has no parent directory")?;
-        let file = path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .context("model_path has no file name")?;
-        (dir.to_path_buf(), format!("/model/{file}"))
+        // Mount the model read-only at /model. If model_path is a directory
+        // (e.g. a HuggingFace model) mount it directly; if it's a file (e.g. a
+        // GGUF shard) mount its parent so all sibling shards are visible.
+        let path = Path::new(&model.model_path);
+        let (host_mount, model_ref) = if path.is_dir() {
+            (path.to_path_buf(), "/model".to_string())
+        } else {
+            let dir = path.parent().context("model_path has no parent directory")?;
+            let file = path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .context("model_path has no file name")?;
+            (dir.to_path_buf(), format!("/model/{file}"))
+        };
+        binds.push(format!("{}:/model:ro", host_mount.display()));
+        Some(model.container_cmd(&model_ref))
     };
-    let bind = format!("{}:/model:ro", host_mount.display());
-    let cmd = model.container_cmd(&model_ref);
+    // User-supplied extra mounts.
+    for m in &model.mounts {
+        binds.push(m.clone());
+    }
 
     // `unless-stopped` starts the model on boot but respects a manual stop,
     // unlike `always` which would resurrect it even after you stop it.
@@ -135,8 +147,16 @@ pub async fn load(docker: &Docker, model: &ModelDef) -> Result<()> {
 
     let host_config = HostConfig {
         network_mode: Some("host".to_string()),
-        binds: Some(vec![bind]),
+        binds: Some(binds),
         runtime: Some("nvidia".to_string()),
+        // vLLM's multiprocessing needs a shared IPC namespace and unlimited
+        // locked memory; harmless for llama.cpp.
+        ipc_mode: Some("host".to_string()),
+        ulimits: Some(vec![bollard::models::ResourcesUlimits {
+            name: Some("memlock".to_string()),
+            soft: Some(-1),
+            hard: Some(-1),
+        }]),
         shm_size: Some(SHM_SIZE),
         device_requests: Some(vec![DeviceRequest {
             driver: Some(String::new()),
@@ -160,7 +180,12 @@ pub async fn load(docker: &Docker, model: &ModelDef) -> Result<()> {
 
     let config = Config {
         image: Some(image),
-        cmd: Some(cmd),
+        cmd,
+        env: if model.env.is_empty() {
+            None
+        } else {
+            Some(model.env.clone())
+        },
         labels: Some(labels),
         host_config: Some(host_config),
         ..Default::default()

@@ -125,6 +125,18 @@ pub struct ModelDef {
     /// Extra raw engine flags.
     #[serde(default)]
     pub extra_args: Vec<String>,
+    /// Extra environment variables ("KEY=VALUE") for the container. Needed for
+    /// images that configure themselves from the environment.
+    #[serde(default)]
+    pub env: Vec<String>,
+    /// Extra bind mounts ("host:container[:ro]"), beyond the default /model mount.
+    #[serde(default)]
+    pub mounts: Vec<String>,
+    /// If true, don't override the image's command — the image's own entrypoint
+    /// configures itself (typically from env vars) and no default /model mount
+    /// is added. Used for custom vLLM images like the DFlash entrypoint.
+    #[serde(default)]
+    pub use_image_entrypoint: bool,
     /// Start automatically on boot (implemented via Docker restart policy).
     #[serde(default)]
     pub autostart: bool,

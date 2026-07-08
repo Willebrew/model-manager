@@ -45,7 +45,7 @@ pub struct MemEstimate {
 /// Estimate a model's memory footprint. Weights come from summing shard file
 /// sizes (exact); KV comes from GGUF hyperparameters (approximate). If the
 /// model has a measured peak from a prior load, that wins for `total_mib`.
-pub fn estimate(model: &ModelDef, overhead_mib: u64) -> MemEstimate {
+pub fn estimate(model: &ModelDef, overhead_mib: u64, total_system_mib: u64) -> MemEstimate {
     let path = Path::new(&model.model_path);
 
     let weights_mib = gguf::model_weight_bytes(path).map(|b| b / MIB).unwrap_or(0);
@@ -55,7 +55,7 @@ pub fn estimate(model: &ModelDef, overhead_mib: u64) -> MemEstimate {
         Engine::Llamacpp => gguf::resolve_gguf(path).and_then(|g| gguf::parse_metadata(&g)),
         Engine::Vllm => gguf::parse_hf_config(path),
     };
-    let (kv_mib, note) = match info {
+    let (kv_mib, mut note) = match info {
         Ok(info) => (
             info.kv_bytes(model.context as u64, &model.kv_type) / MIB,
             None,
@@ -63,7 +63,21 @@ pub fn estimate(model: &ModelDef, overhead_mib: u64) -> MemEstimate {
         Err(e) => (0, Some(format!("KV estimate unavailable: {e}"))),
     };
 
-    let estimated_total = weights_mib + kv_mib + overhead_mib;
+    let mut estimated_total = weights_mib + kv_mib + overhead_mib;
+
+    // vLLM pre-reserves `gpu_memory_utilization` of memory for weights + KV
+    // cache regardless of the weight size, so its real footprint is at least
+    // that fraction of the machine's memory.
+    if model.engine == Engine::Vllm {
+        let reserved = (model.gpu_mem_util_or_default() as f64 * total_system_mib as f64) as u64;
+        if reserved > estimated_total {
+            estimated_total = reserved;
+            let pct = (model.gpu_mem_util_or_default() * 100.0) as u32;
+            note = Some(format!(
+                "vLLM reserves ~{pct}% of memory (gpu_memory_utilization)"
+            ));
+        }
+    }
 
     match model.measured_peak_mib {
         Some(m) => MemEstimate {
