@@ -1,0 +1,416 @@
+//! HTTP API + dashboard for Model Manager.
+
+use crate::config::{Config, ModelDef};
+use crate::docker;
+use crate::memory::{self, MemEstimate, MemSnapshot, OomVerdict};
+use axum::{
+    extract::{Path, Query, State},
+    http::StatusCode,
+    middleware::{from_fn_with_state, Next},
+    response::{Html, IntoResponse, Response},
+    routing::{delete, get, post},
+    Json, Router,
+};
+use bollard::Docker;
+use serde::{Deserialize, Serialize};
+use serde_json::json;
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Duration;
+use sysinfo::System;
+use tokio::sync::Mutex;
+
+pub struct AppState {
+    pub config: Mutex<Config>,
+    pub docker: Docker,
+    pub sys: Mutex<System>,
+    pub http: reqwest::Client,
+}
+
+pub type SharedState = Arc<AppState>;
+
+pub fn router(state: SharedState) -> Router {
+    let protected = Router::new()
+        .route("/api/state", get(get_state))
+        .route("/api/models", post(upsert_model))
+        .route("/api/models/:name", delete(delete_model))
+        .route("/api/models/:name/estimate", get(estimate_model))
+        .route("/api/models/:name/load", post(load_model))
+        .route("/api/models/:name/unload", post(unload_model))
+        .route("/api/models/:name/autostart", post(set_autostart))
+        .route("/api/models/:name/logs", get(model_logs))
+        .layer(from_fn_with_state(state.clone(), auth));
+
+    Router::new()
+        .route("/", get(index))
+        .route("/api/health", get(|| async { Json(json!({"ok": true})) }))
+        .merge(protected)
+        .with_state(state)
+}
+
+async fn index() -> impl IntoResponse {
+    Html(include_str!("web/index.html"))
+}
+
+/// Bearer-token gate for every mutating/reading API call.
+async fn auth(
+    State(state): State<SharedState>,
+    req: axum::extract::Request,
+    next: Next,
+) -> Response {
+    let token = { state.config.lock().await.server.token.clone() };
+    let provided = extract_token(&req);
+    if provided.as_deref() == Some(token.as_str()) {
+        next.run(req).await
+    } else {
+        (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"error": "invalid or missing access token"})),
+        )
+            .into_response()
+    }
+}
+
+fn extract_token(req: &axum::extract::Request) -> Option<String> {
+    // Authorization: Bearer <token>
+    if let Some(h) = req.headers().get("authorization") {
+        if let Ok(s) = h.to_str() {
+            if let Some(t) = s.strip_prefix("Bearer ") {
+                return Some(t.to_string());
+            }
+        }
+    }
+    // ?token=<token> fallback (handy for quick curl / links)
+    if let Some(q) = req.uri().query() {
+        for pair in q.split('&') {
+            if let Some(v) = pair.strip_prefix("token=") {
+                return Some(v.to_string());
+            }
+        }
+    }
+    None
+}
+
+// ----- response models -----
+
+#[derive(Serialize)]
+struct ModelView {
+    def: ModelDef,
+    running: bool,
+    state: String,
+    status: String,
+    healthy: bool,
+    estimate: MemEstimate,
+    oom: OomVerdict,
+}
+
+#[derive(Serialize)]
+struct StateView {
+    memory: MemSnapshot,
+    docker_ok: bool,
+    models: Vec<ModelView>,
+}
+
+async fn snapshot(state: &SharedState) -> MemSnapshot {
+    let mut sys = state.sys.lock().await;
+    memory::snapshot(&mut sys)
+}
+
+async fn model_healthy(state: &SharedState, port: u16) -> bool {
+    let url = format!("http://127.0.0.1:{port}/health");
+    matches!(
+        state.http.get(&url).timeout(Duration::from_millis(800)).send().await,
+        Ok(r) if r.status().is_success()
+    )
+}
+
+async fn get_state(State(state): State<SharedState>) -> impl IntoResponse {
+    let mem = snapshot(&state).await;
+    let docker_ok = docker::ping(&state.docker).await;
+
+    let (models, overhead, safety) = {
+        let cfg = state.config.lock().await;
+        (
+            cfg.models.clone(),
+            cfg.server.overhead_mib,
+            cfg.server.safety_margin_mib,
+        )
+    };
+
+    let statuses = docker::list_managed(&state.docker).await.unwrap_or_default();
+    let by_name: HashMap<String, docker::ContainerStatus> = statuses
+        .into_iter()
+        .map(|s| (s.model_name.clone(), s))
+        .collect();
+
+    let mut views = Vec::new();
+    for def in models {
+        let st = by_name.get(&crate::config::sanitize(&def.name));
+        let running = st.map(|s| s.running).unwrap_or(false);
+        let estimate = memory::estimate(&def, overhead);
+        let oom = memory::oom_check(estimate.total_mib, &mem, safety);
+        let healthy = if running {
+            model_healthy(&state, def.host_port).await
+        } else {
+            false
+        };
+        views.push(ModelView {
+            running,
+            state: st.map(|s| s.state.clone()).unwrap_or_else(|| "absent".into()),
+            status: st.map(|s| s.status.clone()).unwrap_or_default(),
+            healthy,
+            estimate,
+            oom,
+            def,
+        });
+    }
+
+    Json(StateView {
+        memory: mem,
+        docker_ok,
+        models: views,
+    })
+}
+
+#[derive(Deserialize)]
+struct UpsertBody {
+    #[serde(flatten)]
+    model: ModelDef,
+}
+
+async fn upsert_model(
+    State(state): State<SharedState>,
+    Json(body): Json<UpsertBody>,
+) -> impl IntoResponse {
+    if body.model.name.trim().is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": "name required"}))).into_response();
+    }
+    let mut cfg = state.config.lock().await;
+    cfg.upsert(body.model);
+    if let Err(e) = cfg.save() {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("save failed: {e}")})),
+        )
+            .into_response();
+    }
+    (StatusCode::OK, Json(json!({"ok": true}))).into_response()
+}
+
+async fn delete_model(
+    State(state): State<SharedState>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    // Unload first if it exists, then drop from config.
+    let def = { state.config.lock().await.find(&name).cloned() };
+    if let Some(def) = def {
+        let _ = docker::unload(&state.docker, &def).await;
+    }
+    let mut cfg = state.config.lock().await;
+    let removed = cfg.remove(&name);
+    let _ = cfg.save();
+    Json(json!({"ok": true, "removed": removed}))
+}
+
+async fn estimate_model(
+    State(state): State<SharedState>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    let (def, overhead, safety) = {
+        let cfg = state.config.lock().await;
+        match cfg.find(&name) {
+            Some(d) => (d.clone(), cfg.server.overhead_mib, cfg.server.safety_margin_mib),
+            None => {
+                return (StatusCode::NOT_FOUND, Json(json!({"error": "unknown model"})))
+                    .into_response()
+            }
+        }
+    };
+    let mem = snapshot(&state).await;
+    let estimate = memory::estimate(&def, overhead);
+    let oom = memory::oom_check(estimate.total_mib, &mem, safety);
+    Json(json!({"estimate": estimate, "oom": oom, "memory": mem})).into_response()
+}
+
+#[derive(Deserialize)]
+struct LoadQuery {
+    #[serde(default)]
+    force: bool,
+}
+
+async fn load_model(
+    State(state): State<SharedState>,
+    Path(name): Path<String>,
+    Query(q): Query<LoadQuery>,
+) -> impl IntoResponse {
+    let (def, overhead, safety) = {
+        let cfg = state.config.lock().await;
+        match cfg.find(&name) {
+            Some(d) => (d.clone(), cfg.server.overhead_mib, cfg.server.safety_margin_mib),
+            None => {
+                return (StatusCode::NOT_FOUND, Json(json!({"error": "unknown model"})))
+                    .into_response()
+            }
+        }
+    };
+
+    let baseline = snapshot(&state).await;
+    let estimate = memory::estimate(&def, overhead);
+    let oom = memory::oom_check(estimate.total_mib, &baseline, safety);
+
+    if oom.would_oom && !q.force {
+        // Refuse and report why. Client can retry with ?force=true.
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": "would_oom",
+                "message": format!(
+                    "Loading '{}' needs ~{} MiB but only {} MiB is available (safety margin {} MiB). This would likely OOM.",
+                    def.name, oom.needed_mib, oom.available_mib, oom.safety_margin_mib
+                ),
+                "estimate": estimate,
+                "oom": oom,
+            })),
+        )
+            .into_response();
+    }
+
+    if let Err(e) = docker::load(&state.docker, &def).await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("load failed: {e}")})),
+        )
+            .into_response();
+    }
+
+    // Measure the real footprint in the background once the model is healthy,
+    // then persist it so future OOM checks use the measured value.
+    spawn_measure(state.clone(), def.clone(), baseline.available_mib);
+
+    (
+        StatusCode::OK,
+        Json(json!({"ok": true, "estimate": estimate, "oom": oom, "forced": q.force})),
+    )
+        .into_response()
+}
+
+/// Background task: wait for the model to become healthy, let memory settle,
+/// then record the whole-system memory drop as this model's measured peak.
+fn spawn_measure(state: SharedState, def: ModelDef, baseline_available_mib: u64) {
+    tokio::spawn(async move {
+        // Wait up to ~15 minutes for /health (big models mmap slowly).
+        let mut healthy = false;
+        for _ in 0..180 {
+            if model_healthy(&state, def.host_port).await {
+                healthy = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        }
+        if !healthy {
+            return;
+        }
+        // Let allocations settle.
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        let now = snapshot(&state).await;
+        let footprint = baseline_available_mib.saturating_sub(now.available_mib);
+        if footprint == 0 {
+            return;
+        }
+        let mut cfg = state.config.lock().await;
+        if let Some(m) = cfg.find_mut(&def.name) {
+            // Keep the larger of any prior measurement and this one.
+            let new_val = match m.measured_peak_mib {
+                Some(prev) => prev.max(footprint),
+                None => footprint,
+            };
+            m.measured_peak_mib = Some(new_val);
+            let _ = cfg.save();
+            tracing::info!("measured {} footprint = {} MiB", def.name, new_val);
+        }
+    });
+}
+
+async fn unload_model(
+    State(state): State<SharedState>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    let def = { state.config.lock().await.find(&name).cloned() };
+    let def = match def {
+        Some(d) => d,
+        None => {
+            return (StatusCode::NOT_FOUND, Json(json!({"error": "unknown model"})))
+                .into_response()
+        }
+    };
+    match docker::unload(&state.docker, &def).await {
+        Ok(_) => Json(json!({"ok": true})).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("unload failed: {e}")})),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct AutostartBody {
+    enabled: bool,
+}
+
+async fn set_autostart(
+    State(state): State<SharedState>,
+    Path(name): Path<String>,
+    Json(body): Json<AutostartBody>,
+) -> impl IntoResponse {
+    // Persist the flag. If the container is currently running, recreate it so
+    // the Docker restart policy takes effect immediately.
+    let def = {
+        let mut cfg = state.config.lock().await;
+        match cfg.find_mut(&name) {
+            Some(m) => {
+                m.autostart = body.enabled;
+                let d = m.clone();
+                let _ = cfg.save();
+                d
+            }
+            None => {
+                return (StatusCode::NOT_FOUND, Json(json!({"error": "unknown model"})))
+                    .into_response()
+            }
+        }
+    };
+
+    // If running, re-apply by reloading (idempotent) so restart policy updates.
+    let running = docker::status_of(&state.docker, &def)
+        .await
+        .ok()
+        .flatten()
+        .map(|s| s.running)
+        .unwrap_or(false);
+    if running {
+        if let Err(e) = docker::load(&state.docker, &def).await {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("could not re-apply restart policy: {e}")})),
+            )
+                .into_response();
+        }
+    }
+    Json(json!({"ok": true, "autostart": body.enabled, "reapplied": running})).into_response()
+}
+
+async fn model_logs(
+    State(state): State<SharedState>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    let def = { state.config.lock().await.find(&name).cloned() };
+    let def = match def {
+        Some(d) => d,
+        None => return (StatusCode::NOT_FOUND, Json(json!({"error": "unknown model"}))).into_response(),
+    };
+    match docker::logs(&state.docker, &def, 200).await {
+        Ok(text) => Json(json!({"logs": text})).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response(),
+    }
+}
