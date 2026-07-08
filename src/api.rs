@@ -59,7 +59,14 @@ pub fn router(state: SharedState) -> Router {
 }
 
 async fn index() -> impl IntoResponse {
-    Html(include_str!("web/index.html"))
+    // Never cache the dashboard so UI updates show up on a normal refresh.
+    (
+        [(
+            axum::http::header::CACHE_CONTROL,
+            "no-store, no-cache, must-revalidate",
+        )],
+        Html(include_str!("web/index.html")),
+    )
 }
 
 /// Bearer-token gate for every mutating/reading API call.

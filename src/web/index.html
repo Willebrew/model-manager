@@ -1,7 +1,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Model Manager</title>
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none'><path d='M4.5 19.5V6.5L12 13.5 19.5 6.5V19.5' stroke='%23888' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'/><circle cx='4.5' cy='6.5' r='2.2' fill='%23888'/><circle cx='19.5' cy='6.5' r='2.2' fill='%23888'/></svg>">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none'><path d='M3.5 19V6L12 15 20.5 6V19' stroke='%23888' stroke-width='2.6' stroke-linecap='round' stroke-linejoin='round'/></svg>">
 <style>
   :root {
     --paper:#f4f3ef; --surface:#fbfaf7; --ink:#17150f; --muted:#6c685e; --faint:#9a958a;
@@ -95,6 +95,9 @@
   .loadfill { height: 100%; background: var(--warn); border-radius: 2px; transition: width .6s cubic-bezier(.2,.7,.2,1); }
   .loadtxt { font-size: 11.5px; color: var(--warn); margin-top: 5px; font-weight: 600; }
   .acts { display: flex; gap: 2px; align-items: center; margin-top: 4px; }
+  /* Fixed width so Load vs Unload doesn't shift the buttons after it; all rows line up. */
+  .acts .lu { min-width: 66px; text-align: left; font-weight: 600; }
+  .acts .boot { margin-left: 6px; }
   .boot { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); cursor: pointer; user-select: none; padding: 6px 8px; }
   .boot input { appearance: none; width: 30px; height: 16px; background: var(--line); border: 1px solid var(--line2);
     border-radius: 3px; position: relative; cursor: pointer; transition: .15s; }
@@ -141,9 +144,8 @@
 
 <header><div class="wrap bar">
   <svg class="mark" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-    <path d="M4.5 19.5 V6.5 L12 13.5 L19.5 6.5 V19.5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-    <circle cx="4.5" cy="6.5" r="2.1" fill="currentColor"/>
-    <circle cx="19.5" cy="6.5" r="2.1" fill="currentColor"/>
+    <path d="M3.5 19 V6.2 Q3.5 5 4.6 5.5 L12 15 L19.4 5.5 Q20.5 5 20.5 6.2 V19"
+          stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"/>
   </svg>
   <span class="name">Model Manager</span>
   <span class="ver mono" id="host"></span>
@@ -268,7 +270,7 @@ function item(m){
       ${d.description?`<div class="desc">${esc(d.description)}</div>`:''}
       ${loading}
       <div class="acts">
-        ${m.running?`<button class="link warn" data-a="unload">Unload</button>`:`<button class="link" data-a="load"><b>Load</b></button>`}
+        ${m.running?`<button class="link lu warn" data-a="unload">Unload</button>`:`<button class="link lu" data-a="load">Load</button>`}
         <button class="link" data-a="logs">Logs</button>
         <button class="link" data-a="edit">Edit</button>
         <button class="link" data-a="del">Delete</button>
