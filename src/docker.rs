@@ -100,21 +100,30 @@ pub async fn load(docker: &Docker, model: &ModelDef) -> Result<()> {
         )
         .await;
 
-    // Mount the directory holding the GGUF shards read-only at /gguf.
-    let first = Path::new(&model.gguf_path);
-    let gguf_dir = first
-        .parent()
-        .context("gguf_path has no parent directory")?;
-    let gguf_file = first
-        .file_name()
-        .and_then(|s| s.to_str())
-        .context("gguf_path has no file name")?;
-    let bind = format!("{}:/gguf:ro", gguf_dir.display());
-    let container_gguf = format!("/gguf/{gguf_file}");
+    let image = model.effective_image();
+    if image.trim().is_empty() {
+        anyhow::bail!(
+            "no Docker image set for '{}' (llama.cpp models need an image with llama-server)",
+            model.name
+        );
+    }
 
-    // argv: llama-server + the model's flags.
-    let mut cmd = vec![LLAMA_SERVER_BIN.to_string()];
-    cmd.extend(model.llama_args(&container_gguf));
+    // Mount the model read-only at /model. If model_path is a directory (e.g. a
+    // HuggingFace model for vLLM) mount it directly; if it's a file (e.g. a
+    // GGUF shard) mount its parent so all sibling shards are visible.
+    let path = Path::new(&model.model_path);
+    let (host_mount, model_ref) = if path.is_dir() {
+        (path.to_path_buf(), "/model".to_string())
+    } else {
+        let dir = path.parent().context("model_path has no parent directory")?;
+        let file = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .context("model_path has no file name")?;
+        (dir.to_path_buf(), format!("/model/{file}"))
+    };
+    let bind = format!("{}:/model:ro", host_mount.display());
+    let cmd = model.container_cmd(&model_ref);
 
     let restart = if model.autostart {
         RestartPolicyNameEnum::ALWAYS
@@ -148,7 +157,7 @@ pub async fn load(docker: &Docker, model: &ModelDef) -> Result<()> {
     );
 
     let config = Config {
-        image: Some(model.image.clone()),
+        image: Some(image),
         cmd: Some(cmd),
         labels: Some(labels),
         host_config: Some(host_config),

@@ -306,6 +306,95 @@ fn parse_shard_name(name: &str) -> Option<(String, u32)> {
     Some((base.to_string(), count))
 }
 
+/// Total weight bytes for a model path that may be a GGUF (single or sharded)
+/// file, or a HuggingFace-format directory (sum of *.safetensors/*.bin/*.gguf).
+pub fn model_weight_bytes(model_path: &Path) -> Result<u64> {
+    if model_path.is_dir() {
+        let mut total = 0u64;
+        for entry in std::fs::read_dir(model_path)
+            .with_context(|| format!("reading dir {}", model_path.display()))?
+        {
+            let entry = entry?;
+            let p = entry.path();
+            if let Some(ext) = p.extension().and_then(|e| e.to_str()) {
+                if matches!(ext, "safetensors" | "bin" | "gguf" | "pt") {
+                    total += entry.metadata()?.len();
+                }
+            }
+        }
+        if total == 0 {
+            bail!(
+                "no weight files (*.safetensors/*.bin/*.gguf) in {}",
+                model_path.display()
+            );
+        }
+        Ok(total)
+    } else {
+        weights_bytes(model_path)
+    }
+}
+
+/// Locate a GGUF file for a llama.cpp model whose path may be a directory.
+pub fn resolve_gguf(model_path: &Path) -> Result<PathBuf> {
+    if model_path.is_file() {
+        return Ok(model_path.to_path_buf());
+    }
+    if model_path.is_dir() {
+        let mut ggufs: Vec<PathBuf> = std::fs::read_dir(model_path)?
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("gguf"))
+            .collect();
+        ggufs.sort();
+        return ggufs
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow!("no .gguf in {}", model_path.display()));
+    }
+    Err(anyhow!("model path not found: {}", model_path.display()))
+}
+
+/// Parse a HuggingFace `config.json` (next to, or inside, the model path) into
+/// the same hyperparameter shape used for KV estimation. For vLLM models.
+pub fn parse_hf_config(model_path: &Path) -> Result<GgufInfo> {
+    let dir = if model_path.is_dir() {
+        model_path.to_path_buf()
+    } else {
+        model_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf()
+    };
+    let cfg_path = dir.join("config.json");
+    let text = std::fs::read_to_string(&cfg_path)
+        .with_context(|| format!("reading {}", cfg_path.display()))?;
+    let v: serde_json::Value = serde_json::from_str(&text)?;
+    let getu = |k: &str| v.get(k).and_then(|x| x.as_u64());
+
+    let n_head = getu("num_attention_heads").unwrap_or(0);
+    let n_layer = getu("num_hidden_layers").unwrap_or(0);
+    let n_head_kv = getu("num_key_value_heads").unwrap_or(n_head);
+    let hidden = getu("hidden_size").unwrap_or(0);
+    let head_dim = getu("head_dim").unwrap_or(if n_head > 0 { hidden / n_head } else { 0 });
+
+    if n_layer == 0 {
+        bail!("config.json missing num_hidden_layers");
+    }
+    Ok(GgufInfo {
+        arch: v
+            .get("model_type")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string(),
+        n_layer,
+        n_head,
+        n_head_kv,
+        key_length: head_dim,
+        value_length: head_dim,
+        embedding_length: hidden,
+        context_length: getu("max_position_embeddings").unwrap_or(0),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

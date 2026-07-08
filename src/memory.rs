@@ -1,6 +1,6 @@
 //! System memory sampling + per-model footprint estimation and OOM guarding.
 
-use crate::config::ModelDef;
+use crate::config::{Engine, ModelDef};
 use crate::gguf;
 use serde::Serialize;
 use std::path::Path;
@@ -46,11 +46,16 @@ pub struct MemEstimate {
 /// sizes (exact); KV comes from GGUF hyperparameters (approximate). If the
 /// model has a measured peak from a prior load, that wins for `total_mib`.
 pub fn estimate(model: &ModelDef, overhead_mib: u64) -> MemEstimate {
-    let first = Path::new(&model.gguf_path);
+    let path = Path::new(&model.model_path);
 
-    let weights_mib = gguf::weights_bytes(first).map(|b| b / MIB).unwrap_or(0);
+    let weights_mib = gguf::model_weight_bytes(path).map(|b| b / MIB).unwrap_or(0);
 
-    let (kv_mib, note) = match gguf::parse_metadata(first) {
+    // KV hyperparameters come from GGUF metadata (llama.cpp) or config.json (vLLM).
+    let info = match model.engine {
+        Engine::Llamacpp => gguf::resolve_gguf(path).and_then(|g| gguf::parse_metadata(&g)),
+        Engine::Vllm => gguf::parse_hf_config(path),
+    };
+    let (kv_mib, note) = match info {
         Ok(info) => (
             info.kv_bytes(model.context as u64, &model.kv_type) / MIB,
             None,

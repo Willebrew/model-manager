@@ -7,6 +7,33 @@ use std::path::PathBuf;
 /// discover "our" containers and never touch unrelated ones.
 pub const CONTAINER_PREFIX: &str = "modelmgr-";
 
+/// Inference engine that serves a model. Both expose an OpenAI-compatible API.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Engine {
+    /// llama.cpp `llama-server` (GGUF models).
+    Llamacpp,
+    /// vLLM OpenAI server (HuggingFace-format models, and some GGUF).
+    Vllm,
+}
+
+impl Default for Engine {
+    fn default() -> Self {
+        Engine::Llamacpp
+    }
+}
+
+impl Engine {
+    /// Default Docker image when the model doesn't specify one.
+    pub fn default_image(&self) -> &'static str {
+        match self {
+            // No universal default llama.cpp image — user supplies their build.
+            Engine::Llamacpp => "",
+            Engine::Vllm => "vllm/vllm-openai:latest",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerConfig {
     /// Address to bind the dashboard to. Default 0.0.0.0 so it is reachable
@@ -15,6 +42,15 @@ pub struct ServerConfig {
     pub bind: String,
     #[serde(default = "default_port")]
     pub port: u16,
+    /// Serve over HTTPS with a self-signed certificate (auto-generated).
+    #[serde(default = "default_true")]
+    pub tls: bool,
+    /// Optional custom cert/key PEM paths. If unset, a self-signed pair is
+    /// generated once and stored next to the config.
+    #[serde(default)]
+    pub tls_cert_path: Option<String>,
+    #[serde(default)]
+    pub tls_key_path: Option<String>,
     /// Shared access token required by every mutating API call. Generated on
     /// first run. Anyone on the LAN can reach the port, so this is what stops
     /// a random device from starting/stopping models.
@@ -36,6 +72,9 @@ fn default_bind() -> String {
 fn default_port() -> u16 {
     8600
 }
+fn default_true() -> bool {
+    true
+}
 fn default_overhead_mib() -> u64 {
     2560
 }
@@ -51,30 +90,39 @@ pub fn gen_token() -> String {
         .collect()
 }
 
-/// A model the user has registered. Everything needed to launch a llama.cpp
-/// server container for it.
+/// A model the user has registered. Everything needed to launch a server
+/// container for it, on either engine.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelDef {
-    /// Unique, human-friendly id (also becomes the llama-server `-a` alias and
-    /// the OpenAI model id clients use).
+    /// Unique, human-friendly id (also becomes the served model id clients use).
     pub name: String,
     #[serde(default)]
     pub description: String,
-    /// Path to the first GGUF shard (…-00001-of-000NN.gguf) or a single GGUF.
-    pub gguf_path: String,
-    /// Docker image that provides /opt/llama.cpp/build-cuda/bin/llama-server.
+    #[serde(default)]
+    pub engine: Engine,
+    /// Path to the model on this host. For llama.cpp: the first GGUF shard (or a
+    /// single GGUF). For vLLM: a HuggingFace model directory (or GGUF / HF id).
+    #[serde(alias = "gguf_path")]
+    pub model_path: String,
+    /// Docker image. Empty → engine default (`vllm/vllm-openai:latest` for vLLM).
+    #[serde(default)]
     pub image: String,
-    /// Host port llama-server listens on (OpenAI-compatible API).
+    /// Host port the OpenAI-compatible API listens on.
     pub host_port: u16,
     #[serde(default = "default_context")]
     pub context: u32,
+    // ---- llama.cpp-specific ----
     #[serde(default = "default_ngl")]
     pub ngl: u32,
     #[serde(default = "default_kv")]
     pub kv_type: String,
     #[serde(default = "default_threads")]
     pub threads: u32,
-    /// Extra raw llama-server flags (spec-decode, stability flags, etc.).
+    // ---- vLLM-specific ----
+    /// Fraction of GPU/UMA memory vLLM may use (default 0.90 if unset).
+    #[serde(default)]
+    pub gpu_mem_util: Option<f32>,
+    /// Extra raw engine flags.
     #[serde(default)]
     pub extra_args: Vec<String>,
     /// Start automatically on boot (implemented via Docker restart policy).
@@ -110,30 +158,71 @@ impl ModelDef {
         format!("{}{}", CONTAINER_PREFIX, sanitize(&self.name))
     }
 
-    /// The llama-server argv (without the binary path) built from this def.
-    pub fn llama_args(&self, gguf_in_container: &str) -> Vec<String> {
-        let mut a = vec![
-            "-a".into(),
-            self.name.clone(),
-            "-m".into(),
-            gguf_in_container.into(),
-            "--host".into(),
-            "0.0.0.0".into(),
-            "--port".into(),
-            self.host_port.to_string(),
-            "-c".into(),
-            self.context.to_string(),
-            "-ngl".into(),
-            self.ngl.to_string(),
-            "-t".into(),
-            self.threads.to_string(),
-            "-ctk".into(),
-            self.kv_type.clone(),
-            "-ctv".into(),
-            self.kv_type.clone(),
-        ];
-        a.extend(self.extra_args.iter().cloned());
-        a
+    /// Effective Docker image (falls back to the engine default).
+    pub fn effective_image(&self) -> String {
+        if self.image.trim().is_empty() {
+            self.engine.default_image().to_string()
+        } else {
+            self.image.clone()
+        }
+    }
+
+    pub fn gpu_mem_util_or_default(&self) -> f32 {
+        self.gpu_mem_util.unwrap_or(0.90)
+    }
+
+    /// Build the container command (argv appended to the image entrypoint).
+    ///
+    /// - llama.cpp: we invoke the binary explicitly.
+    /// - vLLM: the image entrypoint is the OpenAI server, so we pass only flags.
+    ///
+    /// `model_ref` is the path *inside* the container.
+    pub fn container_cmd(&self, model_ref: &str) -> Vec<String> {
+        match self.engine {
+            Engine::Llamacpp => {
+                let mut a = vec![
+                    crate::docker::LLAMA_SERVER_BIN.to_string(),
+                    "-a".into(),
+                    self.name.clone(),
+                    "-m".into(),
+                    model_ref.into(),
+                    "--host".into(),
+                    "0.0.0.0".into(),
+                    "--port".into(),
+                    self.host_port.to_string(),
+                    "-c".into(),
+                    self.context.to_string(),
+                    "-ngl".into(),
+                    self.ngl.to_string(),
+                    "-t".into(),
+                    self.threads.to_string(),
+                    "-ctk".into(),
+                    self.kv_type.clone(),
+                    "-ctv".into(),
+                    self.kv_type.clone(),
+                ];
+                a.extend(self.extra_args.iter().cloned());
+                a
+            }
+            Engine::Vllm => {
+                let mut a = vec![
+                    "--model".into(),
+                    model_ref.into(),
+                    "--served-model-name".into(),
+                    self.name.clone(),
+                    "--host".into(),
+                    "0.0.0.0".into(),
+                    "--port".into(),
+                    self.host_port.to_string(),
+                    "--max-model-len".into(),
+                    self.context.to_string(),
+                    "--gpu-memory-utilization".into(),
+                    format!("{:.2}", self.gpu_mem_util_or_default()),
+                ];
+                a.extend(self.extra_args.iter().cloned());
+                a
+            }
+        }
     }
 }
 
@@ -162,6 +251,9 @@ fn default_server() -> ServerConfig {
     ServerConfig {
         bind: default_bind(),
         port: default_port(),
+        tls: true,
+        tls_cert_path: None,
+        tls_key_path: None,
         token: gen_token(),
         overhead_mib: default_overhead_mib(),
         safety_margin_mib: default_safety_mib(),
@@ -184,6 +276,13 @@ impl Config {
         }
         let base = dirs::config_dir().unwrap_or_else(|| PathBuf::from("."));
         base.join("model-manager").join("config.toml")
+    }
+
+    pub fn dir() -> PathBuf {
+        Self::path()
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| PathBuf::from("."))
     }
 
     /// Load config, creating a default (with a fresh token) if none exists.

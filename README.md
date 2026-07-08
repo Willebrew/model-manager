@@ -1,6 +1,6 @@
 # Model Manager
 
-A small, memory-aware **web dashboard for running local llama.cpp GGUF models** on a single machine — built for the NVIDIA DGX Spark (GB10, 128 GB unified memory), but works on any Linux box with Docker + an NVIDIA GPU.
+A small, memory-aware **web dashboard for running local LLMs** (llama.cpp **and** vLLM) on a single machine — built for the NVIDIA DGX Spark (GB10, 128 GB unified memory), but works on any Linux box with Docker + an NVIDIA GPU. Served over **HTTPS** and reachable from any device on your network.
 
 It answers the question that matters most on a unified-memory box: **"will this model fit, or will it OOM?"** — *before* you start it.
 
@@ -16,22 +16,23 @@ On a 128 GB Spark a single 4-bit 200B-class model can occupy ~117 GB. Load a sec
 
 ## Features
 
-- 🌐 **Web dashboard** bound to your LAN — open it from your laptop, phone, anything.
-- 📊 **Live memory bar** (RAM + swap) and per-model status (running / loading / stopped / OOM-risk).
+- 🌐 **Web dashboard over HTTPS** bound to your LAN — open it from your laptop, phone, anything (self-signed cert auto-generated on first run).
+- 🧩 **Two engines**: run **llama.cpp** (GGUF) or **vLLM** (HuggingFace-format) models — pick per model.
+- 📊 **Live memory gauge** (RAM + swap) and per-model status (running / loading / stopped / won't-fit).
 - 🧠 **Memory estimator** with a measured-peak cache, so estimates get exact after first run.
 - 🛑 **OOM guard** — a load that won't fit is blocked with a clear explanation; override with one click if you really mean it.
-- 🚀 **One-click load / unload** of llama.cpp server containers.
+- 🚀 **One-click load / unload** of model server containers.
 - ⏻ **Boot autostart** toggle per model.
 - 🔒 **Access token** so only people with the token can control your models.
 - 📜 **Live container logs** in the UI.
 
 ## How it works
 
-Each registered model is launched as a Docker container running llama.cpp's
-`llama-server` (any image that provides the binary works — e.g. a CUDA build for
-your GPU). Model Manager talks to the Docker daemon directly (via the socket),
-mounts the model's GGUF directory read-only, and passes through `--gpus all` +
-the NVIDIA runtime. The dashboard polls the daemon and the system for live state.
+Each registered model is launched as a Docker container running its engine's
+OpenAI-compatible server — llama.cpp's `llama-server` or vLLM's API server.
+Model Manager talks to the Docker daemon directly (via the socket), mounts the
+model read-only at `/model`, and passes through `--gpus all` + the NVIDIA
+runtime. The dashboard polls the daemon and the system for live state.
 
 Memory estimate for a model:
 
@@ -62,9 +63,10 @@ cargo build --release
 On startup it prints your dashboard URL and access token:
 
 ```
-  Local:    http://127.0.0.1:8600/
-  Network:  http://192.168.1.78:8600/   (open this from your Mac)
+  Local:    https://127.0.0.1:8600/
+  Network:  https://192.168.1.78:8600/   (open this from your Mac)
   Token:    iO4EUzsK4eexYdOTFHdYiSo9IODdCZJ5ESTzc4ls
+  Note:     self-signed cert — your browser will warn once; click through.
 ```
 
 Open the Network URL from any device on your LAN and paste the token (or use the
@@ -86,14 +88,17 @@ token. Models are added from the UI, but you can also edit the file directly:
 [server]
 bind = "0.0.0.0"
 port = 8600
+tls = true                # serve HTTPS with a self-signed cert (auto-generated)
 token = "…"
 overhead_mib = 2560       # fixed overhead added to each estimate
 safety_margin_mib = 2048  # keep this much free; less than this = OOM warning
 
+# A llama.cpp (GGUF) model
 [[models]]
 name = "MiniMax-M2.7-UD-IQ4_XS"
+engine = "llamacpp"
 description = "229B MoE, UD-IQ4_XS, 108K ctx + ngram spec-decode"
-gguf_path = "/home/you/models/MiniMax-M2.7-GGUF/UD-IQ4_XS/MiniMax-M2.7-UD-IQ4_XS-00001-of-00004.gguf"
+model_path = "/home/you/models/MiniMax-M2.7-GGUF/UD-IQ4_XS/MiniMax-M2.7-UD-IQ4_XS-00001-of-00004.gguf"
 image = "minimax-m27-longctx-108k"
 host_port = 18080
 context = 108000
@@ -105,10 +110,23 @@ extra_args = ["--jinja", "-fa", "on", "--no-warmup", "-np", "1",
               "--spec-type", "ngram-simple", "--draft-max", "16",
               "--draft-min", "1", "--draft-p-min", "0.5", "--spec-ngram-size-n", "4"]
 autostart = false
+
+# A vLLM (HuggingFace) model — image defaults to vllm/vllm-openai:latest
+[[models]]
+name = "Qwen2.5-72B-Instruct"
+engine = "vllm"
+model_path = "/home/you/models/Qwen2.5-72B-Instruct"   # HF model directory
+host_port = 18081
+context = 32768
+gpu_mem_util = 0.90
+extra_args = ["--tensor-parallel-size", "1"]
+autostart = false
 ```
 
-`gguf_path` points at the **first shard**; all shards in that directory are
-mounted and their sizes summed for the weight estimate.
+For llama.cpp, `model_path` points at the **first GGUF shard**; all shards in
+that directory are mounted and their sizes summed for the weight estimate. For
+vLLM, `model_path` is the **HuggingFace model directory** (weights are summed
+from its `*.safetensors`/`*.bin`, KV from its `config.json`).
 
 ## HTTP API
 
@@ -129,9 +147,12 @@ or `?token=<token>`.
 ## Security note
 
 The dashboard controls processes on your machine and binds to your LAN by
-default. The access token is the only thing gating it — treat it like a
-password. For untrusted networks, put it behind a reverse proxy with TLS, or set
-`bind = "127.0.0.1"` and reach it over SSH.
+default. It serves **HTTPS** with an auto-generated self-signed cert (your
+browser warns once — click through, or import the cert from
+`~/.config/model-manager/cert.pem`). The access token gates every action — treat
+it like a password, and don't reuse a system/sudo password for it. For untrusted
+networks, set `bind = "127.0.0.1"` and reach it over SSH, or front it with a
+reverse proxy that has a real certificate.
 
 ## License
 

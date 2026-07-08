@@ -84,11 +84,50 @@ fn extract_token(req: &axum::extract::Request) -> Option<String> {
     if let Some(q) = req.uri().query() {
         for pair in q.split('&') {
             if let Some(v) = pair.strip_prefix("token=") {
-                return Some(v.to_string());
+                return Some(percent_decode(v));
             }
         }
     }
     None
+}
+
+/// Minimal application/x-www-form-urlencoded decode for query tokens, so a
+/// token containing characters like `!` (`%21`) still matches.
+fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    let hex = |c: u8| -> Option<u8> {
+        match c {
+            b'0'..=b'9' => Some(c - b'0'),
+            b'a'..=b'f' => Some(c - b'a' + 10),
+            b'A'..=b'F' => Some(c - b'A' + 10),
+            _ => None,
+        }
+    };
+    while i < b.len() {
+        match b[i] {
+            b'%' if i + 2 < b.len() => match (hex(b[i + 1]), hex(b[i + 2])) {
+                (Some(h), Some(l)) => {
+                    out.push(h * 16 + l);
+                    i += 3;
+                }
+                _ => {
+                    out.push(b[i]);
+                    i += 1;
+                }
+            },
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            c => {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 // ----- response models -----
