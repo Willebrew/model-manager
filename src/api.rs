@@ -514,23 +514,23 @@ async fn set_autostart(
         }
     };
 
-    // If running, re-apply by reloading (idempotent) so restart policy updates.
-    let running = docker::status_of(&state.docker, &def)
+    // Apply the new policy to the existing container live (no reload). This
+    // works whether the container is running or stopped.
+    let exists = docker::status_of(&state.docker, &def)
         .await
         .ok()
         .flatten()
-        .map(|s| s.running)
-        .unwrap_or(false);
-    if running {
-        if let Err(e) = docker::load(&state.docker, &def).await {
+        .is_some();
+    if exists {
+        if let Err(e) = docker::set_restart_policy(&state.docker, &def, body.enabled).await {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("could not re-apply restart policy: {e}")})),
+                Json(json!({"error": format!("could not update restart policy: {e}")})),
             )
                 .into_response();
         }
     }
-    Json(json!({"ok": true, "autostart": body.enabled, "reapplied": running})).into_response()
+    Json(json!({"ok": true, "autostart": body.enabled, "applied": exists})).into_response()
 }
 
 async fn model_logs(

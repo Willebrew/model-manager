@@ -125,8 +125,10 @@ pub async fn load(docker: &Docker, model: &ModelDef) -> Result<()> {
     let bind = format!("{}:/model:ro", host_mount.display());
     let cmd = model.container_cmd(&model_ref);
 
+    // `unless-stopped` starts the model on boot but respects a manual stop,
+    // unlike `always` which would resurrect it even after you stop it.
     let restart = if model.autostart {
-        RestartPolicyNameEnum::ALWAYS
+        RestartPolicyNameEnum::UNLESS_STOPPED
     } else {
         RestartPolicyNameEnum::NO
     };
@@ -153,7 +155,7 @@ pub async fn load(docker: &Docker, model: &ModelDef) -> Result<()> {
     labels.insert("modelmgr".to_string(), "1".to_string());
     labels.insert(
         "modelmgr.restart".to_string(),
-        if model.autostart { "always" } else { "no" }.to_string(),
+        if model.autostart { "unless-stopped" } else { "no" }.to_string(),
     );
 
     let config = Config {
@@ -180,6 +182,32 @@ pub async fn load(docker: &Docker, model: &ModelDef) -> Result<()> {
         .await
         .with_context(|| format!("starting container {cname}"))?;
 
+    Ok(())
+}
+
+/// Change a container's restart policy in place (no reload). Used by the boot
+/// toggle so flipping it doesn't re-load the whole model.
+pub async fn set_restart_policy(docker: &Docker, model: &ModelDef, autostart: bool) -> Result<()> {
+    use bollard::container::UpdateContainerOptions;
+    let name = model.container_name();
+    let policy = if autostart {
+        RestartPolicyNameEnum::UNLESS_STOPPED
+    } else {
+        RestartPolicyNameEnum::NO
+    };
+    docker
+        .update_container(
+            &name,
+            UpdateContainerOptions::<String> {
+                restart_policy: Some(RestartPolicy {
+                    name: Some(policy),
+                    maximum_retry_count: None,
+                }),
+                ..Default::default()
+            },
+        )
+        .await
+        .with_context(|| format!("updating restart policy for {name}"))?;
     Ok(())
 }
 
