@@ -89,6 +89,10 @@
   .memnum .tag.meas { color: var(--run); }
   .fitline { font-size: 11.5px; margin-top: 1px; }
   .fitline.oom { color: var(--oom); } .fitline.ok { color: var(--muted); }
+  .loadwrap { margin-top: 9px; max-width: 340px; }
+  .loadbar { height: 5px; background: var(--line); border-radius: 2px; overflow: hidden; }
+  .loadfill { height: 100%; background: var(--warn); border-radius: 2px; transition: width .6s cubic-bezier(.2,.7,.2,1); }
+  .loadtxt { font-size: 11.5px; color: var(--warn); margin-top: 5px; font-weight: 600; }
   .acts { display: flex; gap: 2px; align-items: center; margin-top: 4px; }
   .boot { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); cursor: pointer; user-select: none; padding: 6px 8px; }
   .boot input { appearance: none; width: 30px; height: 16px; background: var(--line); border: 1px solid var(--line2);
@@ -236,16 +240,23 @@ function statusEl(m){
 function item(m){
   const d=m.def,e=m.estimate,eng=d.engine||'llamacpp';
   const tag=e.measured?'<span class="tag meas">measured</span>':'<span class="tag">est</span>';
-  const api=m.healthy?` · <a href="${location.protocol}//${location.hostname}:${d.host_port}/v1/models" target="_blank">api ↗</a>`:'';
+  const apiLink=m.healthy?` · <a href="http://${location.hostname}:${d.host_port}/v1/models" target="_blank" rel="noopener">api ↗</a>`:'';
   const fit=(!m.running&&m.oom.would_oom)
     ? `<div class="fitline oom">needs ${gb(m.oom.needed_mib)}, ${gb(m.oom.available_mib)} free</div>`
     : (!m.running?`<div class="fitline ok">${gb(m.oom.headroom_mib)} GB headroom</div>`:'');
+  // live load progress (running but not yet answering /health)
+  const loading = (m.running && !m.healthy && m.phase) ? `
+    <div class="loadwrap">
+      <div class="loadbar"><div class="loadfill" style="width:${m.load_pct||3}%"></div></div>
+      <div class="loadtxt">${esc(m.phase)}${m.load_pct!=null?` · ${m.load_pct}%`:''}</div>
+    </div>` : '';
   const el=document.createElement('div');el.className='item';
   el.innerHTML=`
     <div class="lead">
       <div class="nm">${esc(d.name)} <span class="eng">${ENGINE[eng]||eng}</span> ${statusEl(m)}</div>
-      <div class="sub"><span class="mono">:${d.host_port}</span> · <span class="mono">${(+d.context).toLocaleString()}</span> ctx${eng==='llamacpp'?` · kv ${esc(d.kv_type)}`:''}${api}</div>
+      <div class="sub"><span class="mono">:${d.host_port}</span> · <span class="mono">${(+d.context).toLocaleString()}</span> ctx${eng==='llamacpp'?` · kv ${esc(d.kv_type)}`:''}${apiLink}</div>
       ${d.description?`<div class="desc">${esc(d.description)}</div>`:''}
+      ${loading}
       <div class="acts">
         ${m.running?`<button class="link warn" data-a="unload">Unload</button>`:`<button class="link" data-a="load"><b>Load</b></button>`}
         <button class="link" data-a="logs">Logs</button>

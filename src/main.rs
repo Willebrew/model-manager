@@ -64,6 +64,7 @@ async fn main() -> Result<()> {
         docker,
         sys: Mutex::new(System::new()),
         http: reqwest::Client::new(),
+        loading: Mutex::new(std::collections::HashMap::new()),
     });
 
     let app = api::router(state);

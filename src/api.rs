@@ -25,6 +25,16 @@ pub struct AppState {
     pub docker: Docker,
     pub sys: Mutex<System>,
     pub http: reqwest::Client,
+    /// In-flight loads, keyed by model name, for live progress reporting.
+    pub loading: Mutex<HashMap<String, LoadInfo>>,
+}
+
+/// Snapshot taken when a load starts, so we can report progress as a fraction
+/// of the model's estimated footprint that has been allocated so far.
+#[derive(Clone, Copy)]
+pub struct LoadInfo {
+    pub baseline_used_mib: u64,
+    pub estimate_mib: u64,
 }
 
 pub type SharedState = Arc<AppState>;
@@ -141,6 +151,52 @@ struct ModelView {
     healthy: bool,
     estimate: MemEstimate,
     oom: OomVerdict,
+    /// Human-readable load stage while a model is starting (None once healthy).
+    phase: Option<String>,
+    /// Approximate load progress 0–99 (from memory allocated so far).
+    load_pct: Option<u32>,
+}
+
+/// Determine the current load stage of a starting container by scanning its
+/// recent logs for engine-specific markers.
+async fn load_phase(docker: &Docker, def: &ModelDef) -> String {
+    let logs = docker::logs(docker, def, 80).await.unwrap_or_default();
+    let l = logs.to_lowercase();
+    let has = |s: &str| l.contains(s);
+    match def.engine {
+        crate::config::Engine::Llamacpp => {
+            if has("server is listening") {
+                "Starting API server".into()
+            } else if has("cuda0 model buffer") || has("offloaded") {
+                // pull "offloaded N/M layers" if present
+                if let Some(p) = logs.split("offloaded ").nth(1) {
+                    if let Some(frac) = p.split_whitespace().next() {
+                        return format!("Offloading to GPU ({frac})");
+                    }
+                }
+                "Loading weights to GPU".into()
+            } else if has("loading model tensors") {
+                "Loading tensors".into()
+            } else if has("llama_model_loader") {
+                "Reading model metadata".into()
+            } else {
+                "Starting…".into()
+            }
+        }
+        crate::config::Engine::Vllm => {
+            if has("application startup complete") || has("uvicorn running") {
+                "Starting API server".into()
+            } else if has("model loaded") || has("loading model weights took") {
+                "Model loaded".into()
+            } else if has("loading weights") || has("loading model") {
+                "Loading weights".into()
+            } else if has("initializing") || has("started engine") {
+                "Initializing engine".into()
+            } else {
+                "Starting…".into()
+            }
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -193,6 +249,25 @@ async fn get_state(State(state): State<SharedState>) -> impl IntoResponse {
         } else {
             false
         };
+
+        // While a model is up but not yet answering /health, report its stage
+        // and an approximate progress % from how much memory has filled since
+        // the load began.
+        let (phase, load_pct) = if running && !healthy {
+            let ph = load_phase(&state.docker, &def).await;
+            let pct = {
+                let lg = state.loading.lock().await;
+                lg.get(&def.name).map(|li| {
+                    let grown = mem.used_mib.saturating_sub(li.baseline_used_mib);
+                    ((grown as f64 / li.estimate_mib.max(1) as f64) * 100.0).clamp(0.0, 99.0)
+                        as u32
+                })
+            };
+            (Some(ph), pct)
+        } else {
+            (None, None)
+        };
+
         views.push(ModelView {
             running,
             state: st.map(|s| s.state.clone()).unwrap_or_else(|| "absent".into()),
@@ -200,6 +275,8 @@ async fn get_state(State(state): State<SharedState>) -> impl IntoResponse {
             healthy,
             estimate,
             oom,
+            phase,
+            load_pct,
             def,
         });
     }
@@ -322,6 +399,18 @@ async fn load_model(
             .into_response();
     }
 
+    // Record the starting point so /api/state can report live load progress.
+    {
+        let mut lg = state.loading.lock().await;
+        lg.insert(
+            def.name.clone(),
+            LoadInfo {
+                baseline_used_mib: baseline.used_mib,
+                estimate_mib: estimate.total_mib,
+            },
+        );
+    }
+
     // Measure the real footprint in the background once the model is healthy,
     // then persist it so future OOM checks use the measured value.
     spawn_measure(state.clone(), def.clone(), baseline.available_mib);
@@ -345,6 +434,10 @@ fn spawn_measure(state: SharedState, def: ModelDef, baseline_available_mib: u64)
                 break;
             }
             tokio::time::sleep(Duration::from_secs(5)).await;
+        }
+        // Load finished (healthy) or gave up — stop reporting progress either way.
+        {
+            state.loading.lock().await.remove(&def.name);
         }
         if !healthy {
             return;
@@ -382,6 +475,7 @@ async fn unload_model(
                 .into_response()
         }
     };
+    state.loading.lock().await.remove(&name);
     match docker::unload(&state.docker, &def).await {
         Ok(_) => Json(json!({"ok": true})).into_response(),
         Err(e) => (
