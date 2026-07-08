@@ -3,459 +3,323 @@
 <title>Model Manager</title>
 <style>
   :root {
-    --bg: #0b0e14; --bg2:#0e1220; --panel: #141a27; --panel2: #1a2233; --elev:#1e2739;
-    --border: #232d40; --border2:#2c3852;
-    --text: #eef2f8; --muted: #93a1b8; --faint:#64748b;
-    --accent: #5b8def; --accent2: #7c6cff; --accentSoft: rgba(91,141,239,.14);
-    --ok: #34d399; --okSoft: rgba(52,211,153,.14);
-    --warn: #f5b544; --warnSoft: rgba(245,181,68,.14);
-    --danger: #fb6a6a; --dangerSoft: rgba(251,106,106,.14);
-    --radius: 16px; --shadow: 0 10px 30px rgba(0,0,0,.4);
-    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    --paper:#f4f3ef; --surface:#fbfaf7; --ink:#17150f; --muted:#6c685e; --faint:#9a958a;
+    --line:#e3e0d7; --line2:#d3cfc3;
+    --run:#2f7d4f; --warn:#9a7216; --oom:#b23a34;
+    --runbg:#e9f2ec; --warnbg:#f5eeda; --oombg:#f6e6e3;
+    --r:3px; --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
   }
-  @media (prefers-color-scheme: light) {
+  @media (prefers-color-scheme: dark) {
     :root {
-      --bg:#eef1f7; --bg2:#e7ebf3; --panel:#ffffff; --panel2:#f5f7fb; --elev:#ffffff;
-      --border:#e2e7f0; --border2:#d3dae6;
-      --text:#111726; --muted:#5b6b82; --faint:#8695a9;
-      --accentSoft: rgba(91,141,239,.12); --shadow:0 10px 30px rgba(30,45,80,.10);
+      --paper:#151410; --surface:#1b1a15; --ink:#ece9df; --muted:#a49f90; --faint:#6f6a5d;
+      --line:#2a271f; --line2:#3a362c;
+      --run:#5fbf85; --warn:#d0a34a; --oom:#e2726b;
+      --runbg:#182219; --warnbg:#221d10; --oombg:#241512;
     }
   }
   * { box-sizing: border-box; }
-  html,body { height: 100%; }
   body {
-    margin: 0; color: var(--text);
-    background:
-      radial-gradient(1100px 500px at 15% -10%, rgba(124,108,255,.10), transparent 60%),
-      radial-gradient(900px 500px at 100% 0%, rgba(91,141,239,.10), transparent 55%),
-      var(--bg);
-    font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-    -webkit-font-smoothing: antialiased;
+    margin: 0; background: var(--paper); color: var(--ink);
+    font: 14.5px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility;
   }
-  a { color: var(--accent); text-decoration: none; }
-  a:hover { text-decoration: underline; }
-  .wrap { max-width: 1160px; margin: 0 auto; padding: 0 22px; }
+  .mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+  .wrap { max-width: 940px; margin: 0 auto; padding: 0 24px; }
+  a { color: var(--ink); text-underline-offset: 2px; }
 
-  /* top bar */
-  header { position: sticky; top: 0; z-index: 10; backdrop-filter: blur(12px);
-    background: color-mix(in srgb, var(--bg) 78%, transparent); border-bottom: 1px solid var(--border); }
-  .topbar { display: flex; align-items: center; gap: 14px; height: 62px; }
-  .brand { font-weight: 700; font-size: 16px; letter-spacing:.2px; display: flex; align-items: center; gap: 10px; }
-  .logo { width: 26px; height: 26px; border-radius: 8px; position: relative;
-    background: linear-gradient(135deg, var(--accent), var(--accent2)); box-shadow: 0 4px 14px rgba(91,141,239,.4);}
-  .logo::after{content:"";position:absolute;inset:6px;border-radius:4px;background:var(--bg);opacity:.25;}
+  /* header */
+  header { border-bottom: 1px solid var(--ink); background: var(--paper); position: sticky; top: 0; z-index: 10; }
+  .bar { display: flex; align-items: center; gap: 14px; height: 60px; }
+  .mark { width: 15px; height: 15px; background: var(--ink); display: inline-block; }
+  .name { font-weight: 700; font-size: 15px; letter-spacing: -.2px; }
+  .ver { font-size: 11px; color: var(--faint); letter-spacing: .3px; }
   .grow { flex: 1; }
-  .iconbtn { background: transparent; border: 1px solid transparent; color: var(--muted);
-    width: 36px; height: 36px; border-radius: 10px; cursor: pointer; font-size: 15px; }
-  .iconbtn:hover { background: var(--panel2); color: var(--text); }
 
-  button { font: inherit; cursor: pointer; border: 1px solid var(--border2); background: var(--panel2);
-    color: var(--text); padding: 8px 14px; border-radius: 10px; transition: .15s; font-weight: 500; }
-  button:hover { border-color: var(--accent); background: var(--elev); }
-  button.primary { background: linear-gradient(180deg, var(--accent), color-mix(in srgb,var(--accent) 82%, #000));
-    border: none; color: #fff; font-weight: 600; box-shadow: 0 4px 14px rgba(91,141,239,.35); }
-  button.primary:hover { filter: brightness(1.07); }
-  button.ghost { background: transparent; }
-  button.danger { color: var(--danger); border-color: transparent; background: transparent; }
-  button.danger:hover { background: var(--dangerSoft); border-color: transparent; }
-  button:disabled { opacity: .45; cursor: not-allowed; }
-  .btnrow { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  button { font: inherit; cursor: pointer; border: 1px solid var(--line2); background: transparent;
+    color: var(--ink); padding: 6px 12px; border-radius: var(--r); transition: .12s; }
+  button:hover { border-color: var(--ink); }
+  button.solid { background: var(--ink); color: var(--paper); border-color: var(--ink); font-weight: 600; }
+  button.solid:hover { opacity: .85; }
+  button.link { border: none; padding: 6px 8px; color: var(--muted); }
+  button.link:hover { color: var(--ink); background: transparent; text-decoration: underline; }
+  button.link.warn { color: var(--oom); }
+  button:disabled { opacity: .4; cursor: not-allowed; }
+  .icon { border: none; background: transparent; color: var(--muted); padding: 6px; font-size: 15px; }
+  .icon:hover { color: var(--ink); }
+  .lbl { font-size: 11px; font-weight: 600; letter-spacing: .12em; text-transform: uppercase; color: var(--faint); }
 
-  /* system panel */
-  .sys { margin: 22px 0 10px; background: linear-gradient(180deg, var(--panel), var(--panel2));
-    border: 1px solid var(--border); border-radius: var(--radius); padding: 20px; box-shadow: var(--shadow); }
-  .sys .head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 14px; }
-  .sys .head h1 { font-size: 14px; margin: 0; color: var(--muted); font-weight: 600; letter-spacing: .8px; text-transform: uppercase;}
-  .meter { height: 30px; border-radius: 10px; background: var(--bg2); border: 1px solid var(--border);
-    position: relative; overflow: hidden; }
-  .meter .fill { height: 100%; width: 0%;
-    background: linear-gradient(90deg, var(--accent), var(--accent2)); transition: width .6s cubic-bezier(.2,.7,.2,1); }
-  .meter .fill.warn { background: linear-gradient(90deg, var(--warn), #f59e0b); }
-  .meter .fill.hot { background: linear-gradient(90deg, #f97362, var(--danger)); }
-  .meter .lab { position: absolute; inset: 0; display: flex; align-items: center; padding: 0 12px;
-    font-size: 12.5px; font-weight: 600; justify-content: space-between; }
-  .meter .lab .r { color: rgba(255,255,255,.9); text-shadow: 0 1px 3px rgba(0,0,0,.5); }
-  .kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-top: 14px; }
-  .kpi { background: var(--bg2); border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; }
-  .kpi .k { font-size: 11px; color: var(--faint); text-transform: uppercase; letter-spacing: .5px; }
-  .kpi .v { font-size: 20px; font-weight: 700; margin-top: 3px; display:flex; align-items:center; gap:8px; }
-  .kpi .v small { font-size: 12px; color: var(--muted); font-weight: 500; }
-  .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
-  .dot.ok { background: var(--ok); box-shadow: 0 0 8px var(--ok); }
-  .dot.bad { background: var(--danger); box-shadow: 0 0 8px var(--danger); }
+  /* memory strip */
+  .mem { padding: 26px 0 20px; border-bottom: 1px solid var(--line); }
+  .mem .row { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 10px; }
+  .mem .read { font-size: 15px; }
+  .mem .read b { font-weight: 700; }
+  .track { height: 8px; background: var(--line); border-radius: 2px; overflow: hidden; }
+  .track .fill { height: 100%; background: var(--ink); border-radius: 2px; transition: width .5s cubic-bezier(.2,.7,.2,1); }
+  .track .fill.warn { background: var(--warn); } .track .fill.hot { background: var(--oom); }
+  .stats { display: flex; gap: 22px; margin-top: 11px; font-size: 12.5px; color: var(--muted); flex-wrap: wrap; }
+  .stats b { color: var(--ink); font-weight: 600; }
+  .stats .st { display: flex; gap: 6px; align-items: center; }
+  .dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; background: var(--faint); }
+  .dot.ok { background: var(--run); } .dot.bad { background: var(--oom); }
 
-  /* models */
-  .section { display: flex; align-items: center; margin: 26px 0 14px; }
-  .section h2 { font-size: 13px; margin: 0; color: var(--muted); font-weight: 700; letter-spacing: .8px; text-transform: uppercase; }
-  .count { margin-left: 8px; font-size: 12px; color: var(--faint); background: var(--panel2);
-    padding: 2px 8px; border-radius: 999px; }
-  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 16px; padding-bottom: 60px; }
-  .card { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius);
-    padding: 18px; display: flex; flex-direction: column; gap: 14px; position: relative; overflow: hidden;
-    transition: border-color .2s, transform .2s; }
-  .card:hover { border-color: var(--border2); }
-  .card.running { border-color: color-mix(in srgb, var(--ok) 40%, var(--border)); }
-  .card.running::before { content:""; position:absolute; left:0; top:0; bottom:0; width:3px;
-    background: linear-gradient(180deg, var(--ok), transparent); }
-  .card .title { display: flex; align-items: flex-start; gap: 10px; }
-  .card h3 { margin: 0; font-size: 16px; font-weight: 650; word-break: break-word; line-height: 1.3; flex: 1; }
-  .chips { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
-  .chip { font-size: 10.5px; font-weight: 700; padding: 3px 8px; border-radius: 6px; letter-spacing: .3px;
-    background: var(--panel2); color: var(--muted); border: 1px solid var(--border); text-transform: uppercase; }
-  .chip.eng-llamacpp { color: #8fb4ff; background: rgba(91,141,239,.12); border-color: transparent; }
-  .chip.eng-vllm { color: #b9a4ff; background: rgba(124,108,255,.14); border-color: transparent; }
-  .pill { font-size: 11px; font-weight: 700; padding: 4px 10px; border-radius: 999px; letter-spacing: .3px;
-    display: inline-flex; align-items: center; gap: 6px; }
-  .pill.run { background: var(--okSoft); color: var(--ok); }
-  .pill.load { background: var(--warnSoft); color: var(--warn); }
-  .pill.stop { background: var(--panel2); color: var(--faint); }
-  .pill.oom { background: var(--dangerSoft); color: var(--danger); }
-  .pill .dot { width: 7px; height: 7px; box-shadow: none; }
-  .pill.run .dot { background: var(--ok); animation: pulse 2s infinite; }
-  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.35} }
-  .desc { color: var(--muted); font-size: 13px; margin-top: -6px; }
+  /* model list */
+  .listhead { display: flex; align-items: baseline; gap: 10px; margin: 26px 0 2px; }
+  .listhead .ct { font-size: 12px; color: var(--faint); }
+  .list { border-top: 1px solid var(--line); }
+  .item { border-bottom: 1px solid var(--line); padding: 18px 2px; display: grid;
+    grid-template-columns: 1fr auto; gap: 8px 18px; align-items: start; }
+  .item .lead { min-width: 0; }
+  .item .nm { font-size: 15.5px; font-weight: 650; letter-spacing: -.2px; display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
+  .eng { font-size: 10.5px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--muted);
+    border: 1px solid var(--line2); padding: 1px 6px; border-radius: 2px; }
+  .sub { font-size: 12.5px; color: var(--muted); margin-top: 4px; }
+  .sub .mono { color: var(--ink); }
+  .desc { font-size: 12.5px; color: var(--faint); margin-top: 3px; }
+  .status { display: inline-flex; align-items: center; gap: 7px; font-size: 12.5px; font-weight: 600; }
+  .status.run { color: var(--run); } .status.load { color: var(--warn); }
+  .status.stop { color: var(--faint); } .status.oom { color: var(--oom); }
+  .status .dot { width: 7px; height: 7px; }
+  .status.run .dot { background: var(--run); } .status.load .dot { background: var(--warn); }
+  .status.oom .dot { background: var(--oom); }
+  .rt { text-align: right; display: flex; flex-direction: column; align-items: flex-end; gap: 7px; }
+  .memnum { font-size: 15px; font-weight: 700; }
+  .memnum .u { font-size: 11px; color: var(--faint); font-weight: 500; margin-left: 3px; }
+  .memnum .tag { font-size: 9.5px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase;
+    color: var(--faint); margin-left: 7px; }
+  .memnum .tag.meas { color: var(--run); }
+  .fitline { font-size: 11.5px; margin-top: 1px; }
+  .fitline.oom { color: var(--oom); } .fitline.ok { color: var(--muted); }
+  .acts { display: flex; gap: 2px; align-items: center; margin-top: 4px; }
+  .boot { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); cursor: pointer; user-select: none; padding: 6px 8px; }
+  .boot input { appearance: none; width: 30px; height: 16px; background: var(--line); border: 1px solid var(--line2);
+    border-radius: 3px; position: relative; cursor: pointer; transition: .15s; }
+  .boot input:checked { background: var(--ink); border-color: var(--ink); }
+  .boot input::after { content:""; position: absolute; width: 12px; height: 12px; background: var(--paper);
+    top: 1px; left: 1px; border-radius: 2px; transition: .15s; }
+  .boot input:checked::after { left: 15px; }
 
-  .memblock { background: var(--bg2); border: 1px solid var(--border); border-radius: 12px; padding: 13px 14px; }
-  .memblock .top { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 9px; }
-  .memblock .amt { font-size: 22px; font-weight: 750; letter-spacing: -.3px; }
-  .memblock .amt small { font-size: 12px; color: var(--muted); font-weight: 500; margin-left: 4px; }
-  .tag { font-size: 10px; font-weight: 700; padding: 2px 7px; border-radius: 5px; text-transform: uppercase; letter-spacing:.4px; }
-  .tag.est { background: var(--panel2); color: var(--faint); }
-  .tag.meas { background: var(--okSoft); color: var(--ok); }
-  .fitbar { height: 7px; border-radius: 5px; background: var(--panel2); overflow: hidden; margin: 8px 0 6px; position:relative; }
-  .fitbar .seg { height: 100%; float: left; }
-  .fitbar .used { background: color-mix(in srgb, var(--faint) 55%, transparent); }
-  .fitbar .thisfit { background: linear-gradient(90deg, var(--accent), var(--accent2)); }
-  .fitbar .thisoom { background: linear-gradient(90deg, #f97362, var(--danger)); }
-  .brk { font-size: 11.5px; color: var(--faint); }
-  .oomnote { font-size: 12px; color: var(--danger); display: flex; gap: 6px; align-items: center; margin-top:2px;}
-  .okhead { font-size: 12px; color: var(--muted); margin-top:2px; }
-
-  .meta { display: grid; grid-template-columns: auto 1fr; gap: 6px 12px; font-size: 13px; }
-  .meta .k { color: var(--faint); }
-  .meta .v { color: var(--text); word-break: break-word; }
-  .actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: auto; align-items: center; padding-top: 4px; }
-  .switch { display: inline-flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--muted); margin-left: auto; user-select:none; }
-  .switch input { appearance: none; width: 36px; height: 20px; background: var(--panel2); border: 1px solid var(--border2);
-    border-radius: 999px; position: relative; cursor: pointer; transition: .2s; }
-  .switch input:checked { background: var(--accent); border-color: var(--accent); }
-  .switch input::after { content:""; position:absolute; width:16px; height:16px; border-radius:50%; background:#fff;
-    top:1px; left:1px; transition:.2s; box-shadow: 0 1px 3px rgba(0,0,0,.3); }
-  .switch input:checked::after { left: 17px; }
-
-  .empty { grid-column: 1/-1; text-align: center; color: var(--muted); padding: 70px 20px;
-    border: 1px dashed var(--border2); border-radius: var(--radius); }
-  .empty .big { font-size: 40px; margin-bottom: 10px; opacity:.5; }
+  .empty { padding: 60px 10px; text-align: center; color: var(--muted); }
 
   /* modal */
-  .overlay { position: fixed; inset: 0; background: rgba(4,7,13,.6); backdrop-filter: blur(4px);
-    display: none; align-items: center; justify-content: center; z-index: 50; padding: 18px; }
+  .overlay { position: fixed; inset: 0; background: rgba(20,18,12,.4); display: none;
+    align-items: center; justify-content: center; z-index: 50; padding: 18px; }
   .overlay.show { display: flex; }
-  .modal { background: var(--panel); border: 1px solid var(--border2); border-radius: 18px;
-    width: 100%; max-width: 580px; max-height: 92vh; overflow: auto; box-shadow: var(--shadow); }
-  .modal h3 { margin: 0; padding: 18px 20px; border-bottom: 1px solid var(--border); font-size: 16px; }
+  .modal { background: var(--surface); border: 1px solid var(--ink); border-radius: var(--r);
+    width: 100%; max-width: 540px; max-height: 92vh; overflow: auto; }
+  .modal h3 { margin: 0; padding: 16px 20px; border-bottom: 1px solid var(--line); font-size: 15px; }
   .modal .body { padding: 18px 20px; display: flex; flex-direction: column; gap: 14px; }
-  .modal .foot { padding: 15px 20px; border-top: 1px solid var(--border); display: flex; gap: 10px; justify-content: flex-end; }
-  label { font-size: 12.5px; color: var(--muted); display: flex; flex-direction: column; gap: 6px; font-weight: 500; }
+  .modal .foot { padding: 14px 20px; border-top: 1px solid var(--line); display: flex; gap: 10px; justify-content: flex-end; }
+  label { font-size: 12px; color: var(--muted); display: flex; flex-direction: column; gap: 6px; }
   input[type=text], input[type=number], textarea, select {
-    font: inherit; background: var(--bg2); color: var(--text); border: 1px solid var(--border2);
-    border-radius: 10px; padding: 9px 11px; width: 100%; }
-  input:focus, textarea:focus, select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accentSoft); }
-  textarea { resize: vertical; min-height: 62px; font-family: var(--mono); font-size: 13px; }
+    font: inherit; background: var(--paper); color: var(--ink); border: 1px solid var(--line2);
+    border-radius: var(--r); padding: 8px 10px; width: 100%; }
+  .mono-in { font-family: var(--mono); font-size: 13px; }
+  input:focus, textarea:focus, select:focus { outline: none; border-color: var(--ink); }
+  textarea { resize: vertical; min-height: 60px; font-family: var(--mono); font-size: 12.5px; }
   .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-  .hint { font-size: 11px; color: var(--faint); }
-  .segbtns { display: flex; gap: 8px; }
-  .segbtns button { flex: 1; }
-  .segbtns button.sel { border-color: var(--accent); background: var(--accentSoft); color: var(--text); }
-  pre.logs { background: #05070c; color: #a5d6ff; padding: 14px; border-radius: 10px; max-height: 56vh;
-    overflow: auto; font-size: 12px; white-space: pre-wrap; border: 1px solid var(--border); font-family: var(--mono); }
-  #toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%) translateY(20px);
-    background: var(--elev); border: 1px solid var(--border2); padding: 13px 18px; border-radius: 12px;
-    box-shadow: var(--shadow); opacity: 0; pointer-events: none; transition: .25s; z-index: 60; max-width: 92vw; font-size: 14px; }
+  .hint { font-size: 11px; color: var(--faint); font-weight: 400; }
+  .seg { display: flex; border: 1px solid var(--line2); border-radius: var(--r); overflow: hidden; width: max-content; }
+  .seg button { border: none; border-radius: 0; padding: 7px 16px; color: var(--muted); }
+  .seg button + button { border-left: 1px solid var(--line2); }
+  .seg button.sel { background: var(--ink); color: var(--paper); }
+  pre.logs { background: #100f0a; color: #d8d2c2; padding: 14px; border-radius: var(--r); max-height: 56vh;
+    overflow: auto; font-size: 12px; white-space: pre-wrap; font-family: var(--mono); }
+  #toast { position: fixed; bottom: 22px; left: 50%; transform: translateX(-50%) translateY(14px);
+    background: var(--ink); color: var(--paper); padding: 11px 16px; border-radius: var(--r);
+    opacity: 0; pointer-events: none; transition: .2s; z-index: 60; font-size: 13.5px; max-width: 90vw; }
   #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
-  #toast.err { border-color: var(--danger); } #toast.ok { border-color: var(--ok); }
-  @media (max-width: 620px){ .kpis{grid-template-columns:repeat(2,1fr)} .grid{grid-template-columns:1fr} }
+  #toast.err { background: var(--oom); }
+  @media (max-width: 560px){ .item{grid-template-columns:1fr} .rt{align-items:flex-start} .row2{grid-template-columns:1fr} }
 </style>
 
-<header><div class="wrap topbar">
-  <div class="brand"><span class="logo"></span> Model&nbsp;Manager</div>
-  <div class="grow"></div>
-  <button class="primary" id="addBtn">+ Add model</button>
-  <button class="iconbtn" id="logoutBtn" title="Forget token">⎋</button>
+<header><div class="wrap bar">
+  <span class="mark"></span>
+  <span class="name">Model Manager</span>
+  <span class="ver mono" id="host"></span>
+  <span class="grow"></span>
+  <button class="solid" id="addBtn">Add model</button>
+  <button class="icon" id="logoutBtn" title="Forget token">⎋</button>
 </div></header>
 
 <div class="wrap">
-  <!-- system panel -->
-  <div class="sys">
-    <div class="head"><h1>System memory</h1><span id="memhint" class="hint"></span></div>
-    <div class="meter"><div class="fill" id="memfill"></div>
-      <div class="lab"><span id="memused">—</span><span class="r" id="mempct"></span></div></div>
-    <div class="kpis">
-      <div class="kpi"><div class="k">Available</div><div class="v" id="kAvail">—</div></div>
-      <div class="kpi"><div class="k">Total</div><div class="v" id="kTotal">—</div></div>
-      <div class="kpi"><div class="k">Swap</div><div class="v" id="kSwap">—</div></div>
-      <div class="kpi"><div class="k">Docker</div><div class="v" id="kDocker">—</div></div>
+  <div class="mem">
+    <div class="row"><span class="lbl">Memory</span>
+      <span class="read mono"><b id="memUsed">—</b> <span style="color:var(--faint)">/ <span id="memTotal">—</span> GB</span></span></div>
+    <div class="track"><div class="fill" id="memFill"></div></div>
+    <div class="stats">
+      <span class="st"><span class="lbl">avail</span> <b class="mono" id="sAvail">—</b></span>
+      <span class="st"><span class="lbl">swap</span> <b class="mono" id="sSwap">—</b></span>
+      <span class="st"><span class="lbl">docker</span> <span class="dot" id="sDot"></span> <b id="sDocker">—</b></span>
     </div>
   </div>
 
-  <div class="section"><h2>Models</h2><span class="count" id="count">0</span></div>
-  <div class="grid" id="grid"></div>
+  <div class="listhead"><span class="lbl">Models</span><span class="ct mono" id="count"></span></div>
+  <div class="list" id="list"></div>
 </div>
 
-<!-- Add/Edit modal -->
+<!-- Add/Edit -->
 <div class="overlay" id="editOverlay"><div class="modal">
   <h3 id="editTitle">Add model</h3>
   <div class="body">
     <label>Engine
-      <div class="segbtns" id="engSel">
-        <button type="button" data-eng="llamacpp" class="sel">llama.cpp</button>
-        <button type="button" data-eng="vllm">vLLM</button>
-      </div>
-    </label>
-    <label>Name <span class="hint">— also the model id API clients use</span>
-      <input type="text" id="f_name" placeholder="MiniMax-M2.7-UD-IQ4_XS"></label>
+      <div class="seg" id="engSel"><button type="button" data-eng="llamacpp" class="sel">llama.cpp</button><button type="button" data-eng="vllm">vLLM</button></div></label>
+    <label>Name <span class="hint">— the model id API clients use</span>
+      <input type="text" id="f_name" class="mono-in" placeholder="MiniMax-M2.7-UD-IQ4_XS"></label>
     <label>Description <input type="text" id="f_desc" placeholder="optional"></label>
-    <label id="lbl_path">Model path on this machine
-      <input type="text" id="f_path" placeholder="/home/you/models/.../model-00001-of-00004.gguf">
-      <span class="hint" id="pathHint">llama.cpp: first GGUF shard. vLLM: HuggingFace model directory.</span></label>
-    <label>Docker image
-      <input type="text" id="f_image" placeholder="minimax-m27-longctx-108k">
-      <span class="hint" id="imgHint"></span></label>
+    <label id="lbl_path">Model path <span class="hint" id="pathHint"></span>
+      <input type="text" id="f_path" class="mono-in" placeholder="/models/.../model-00001-of-00004.gguf"></label>
+    <label>Docker image <span class="hint" id="imgHint"></span>
+      <input type="text" id="f_image" class="mono-in" placeholder="minimax-m27-longctx-108k"></label>
     <div class="row2">
-      <label>Host port <input type="number" id="f_port" value="18080"></label>
-      <label>Context (tokens) <input type="number" id="f_ctx" value="8192"></label>
+      <label>Host port <input type="number" id="f_port" class="mono-in" value="18080"></label>
+      <label>Context <input type="number" id="f_ctx" class="mono-in" value="8192"></label>
     </div>
     <div class="row2" id="llamaFields">
-      <label>GPU layers (ngl) <input type="number" id="f_ngl" value="99"></label>
-      <label>Threads <input type="number" id="f_threads" value="20"></label>
+      <label>GPU layers <input type="number" id="f_ngl" class="mono-in" value="99"></label>
+      <label>Threads <input type="number" id="f_threads" class="mono-in" value="20"></label>
     </div>
     <label id="kvField">KV cache type
-      <select id="f_kv"><option>f16</option><option>bf16</option><option>q8_0</option>
-        <option>q5_1</option><option>q5_0</option><option>q4_1</option><option>q4_0</option><option>f32</option></select></label>
-    <label id="vllmField" style="display:none">GPU memory utilization (0–1)
-      <input type="number" id="f_gpu" value="0.90" step="0.05" min="0.1" max="1">
-      <span class="hint">Fraction of GPU/unified memory vLLM may claim.</span></label>
+      <select id="f_kv"><option>f16</option><option>bf16</option><option>q8_0</option><option>q5_1</option><option>q5_0</option><option>q4_1</option><option>q4_0</option><option>f32</option></select></label>
+    <label id="vllmField" style="display:none">GPU memory utilization <span class="hint">0–1</span>
+      <input type="number" id="f_gpu" class="mono-in" value="0.90" step="0.05" min="0.1" max="1"></label>
     <label>Extra flags <span class="hint">— one token per line</span>
       <textarea id="f_extra" placeholder="--jinja&#10;-fa&#10;on"></textarea></label>
-    <label class="switch" style="margin:0"><input type="checkbox" id="f_auto"> Start automatically on boot</label>
+    <label class="boot" style="margin:0"><input type="checkbox" id="f_auto"> Start on boot</label>
   </div>
-  <div class="foot"><button class="ghost" id="editCancel">Cancel</button><button class="primary" id="editSave">Save model</button></div>
+  <div class="foot"><button id="editCancel">Cancel</button><button class="solid" id="editSave">Save</button></div>
 </div></div>
 
-<!-- Confirm modal -->
-<div class="overlay" id="confirmOverlay"><div class="modal" style="max-width:480px">
-  <h3 id="confirmTitle">Confirm</h3>
-  <div class="body"><div id="confirmMsg"></div></div>
-  <div class="foot"><button class="ghost" id="confirmCancel">Cancel</button><button class="primary" id="confirmOk">Confirm</button></div>
+<div class="overlay" id="confirmOverlay"><div class="modal" style="max-width:460px">
+  <h3 id="confirmTitle">Confirm</h3><div class="body"><div id="confirmMsg"></div></div>
+  <div class="foot"><button id="confirmCancel">Cancel</button><button class="solid" id="confirmOk">Confirm</button></div>
 </div></div>
 
-<!-- Token gate -->
-<div class="overlay" id="tokenOverlay"><div class="modal" style="max-width:460px">
-  <h3>🔒 Access token</h3>
-  <div class="body">
-    <p style="margin:0;color:var(--muted)">This dashboard controls model processes on this machine. Enter the token printed in the server's terminal.</p>
-    <label>Token <input type="text" id="tokenInput" placeholder="paste token"></label>
-  </div>
-  <div class="foot"><button class="primary" id="tokenSave">Connect</button></div>
+<div class="overlay" id="tokenOverlay"><div class="modal" style="max-width:440px">
+  <h3>Access token</h3>
+  <div class="body"><p style="margin:0;color:var(--muted)">This dashboard controls models on this machine. Enter the token from the server terminal.</p>
+    <label>Token <input type="password" id="tokenInput" class="mono-in" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="paste token"></label></div>
+  <div class="foot"><button class="solid" id="tokenSave">Connect</button></div>
 </div></div>
 
-<!-- Logs -->
-<div class="overlay" id="logsOverlay"><div class="modal" style="max-width:860px">
-  <h3 id="logsTitle">Logs</h3>
-  <div class="body"><pre class="logs" id="logsBody">loading…</pre></div>
-  <div class="foot"><button class="ghost" id="logsClose">Close</button></div>
+<div class="overlay" id="logsOverlay"><div class="modal" style="max-width:840px">
+  <h3 id="logsTitle">Logs</h3><div class="body"><pre class="logs" id="logsBody">loading…</pre></div>
+  <div class="foot"><button id="logsClose">Close</button></div>
 </div></div>
 
 <div id="toast"></div>
 
 <script>
-const $ = (id) => document.getElementById(id);
-let TOKEN = localStorage.getItem('mm_token') || (new URLSearchParams(location.search).get('token') || '');
-if (TOKEN) localStorage.setItem('mm_token', TOKEN);
-let editing = null, curEngine = 'llamacpp';
-const ENGINE_LABEL = { llamacpp: 'llama.cpp', vllm: 'vLLM' };
+const $=(id)=>document.getElementById(id);
+let TOKEN=localStorage.getItem('mm_token')||(new URLSearchParams(location.search).get('token')||'');
+if(TOKEN) localStorage.setItem('mm_token',TOKEN);
+let editing=null, curEngine='llamacpp';
+const ENGINE={llamacpp:'llama.cpp',vllm:'vLLM'};
+function toast(m,k){const t=$('toast');t.textContent=m;t.className='show '+(k||'');clearTimeout(t._t);t._t=setTimeout(()=>t.className=t.className.replace('show','').trim(),3600);}
+function gb(m){return (m/1024).toFixed(1);}
+function esc(s){return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
+async function api(p,o={}){o.headers=Object.assign({'Authorization':'Bearer '+TOKEN},o.headers||{});
+  if(o.body&&typeof o.body!=='string'){o.headers['Content-Type']='application/json';o.body=JSON.stringify(o.body);}
+  const r=await fetch(p,o);let d=null;try{d=await r.json();}catch(e){}
+  if(r.status===401){showToken();throw{status:401,d};} if(!r.ok)throw{status:r.status,data:d};return d;}
+function showToken(){$('tokenOverlay').classList.add('show');}
+$('tokenSave').onclick=()=>{TOKEN=$('tokenInput').value.trim();localStorage.setItem('mm_token',TOKEN);$('tokenOverlay').classList.remove('show');refresh();};
+$('logoutBtn').onclick=()=>{localStorage.removeItem('mm_token');TOKEN='';showToken();};
 
-function toast(msg, kind) { const t=$('toast'); t.textContent=msg; t.className='show '+(kind||'');
-  clearTimeout(t._t); t._t=setTimeout(()=>t.className=t.className.replace('show','').trim(),3800); }
-function gb(mib){ return (mib/1024).toFixed(1); }
-function esc(s){ return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
-
-async function api(path, opts={}) {
-  opts.headers = Object.assign({'Authorization':'Bearer '+TOKEN}, opts.headers||{});
-  if (opts.body && typeof opts.body!=='string'){ opts.headers['Content-Type']='application/json'; opts.body=JSON.stringify(opts.body); }
-  const r = await fetch(path, opts);
-  let data=null; try{ data=await r.json(); }catch(e){}
-  if (r.status===401){ showToken(); throw {status:401,data}; }
-  if (!r.ok) throw {status:r.status,data};
-  return data;
+function statusEl(m){
+  if(m.running&&m.healthy) return '<span class="status run"><span class="dot"></span>Running</span>';
+  if(m.running) return '<span class="status load"><span class="dot"></span>Loading</span>';
+  if(m.oom.would_oom) return '<span class="status oom"><span class="dot"></span>Won\'t fit</span>';
+  return '<span class="status stop"><span class="dot"></span>Stopped</span>';
 }
-function showToken(){ $('tokenOverlay').classList.add('show'); }
-$('tokenSave').onclick=()=>{ TOKEN=$('tokenInput').value.trim(); localStorage.setItem('mm_token',TOKEN);
-  $('tokenOverlay').classList.remove('show'); refresh(); };
-$('logoutBtn').onclick=()=>{ localStorage.removeItem('mm_token'); TOKEN=''; showToken(); };
-
-function statusPill(m){
-  if (m.running && m.healthy) return '<span class="pill run"><span class="dot"></span>Running</span>';
-  if (m.running && !m.healthy) return '<span class="pill load"><span class="dot"></span>Loading…</span>';
-  if (m.oom.would_oom) return '<span class="pill oom">Won\'t fit</span>';
-  return '<span class="pill stop">Stopped</span>';
-}
-
-function card(m, mem){
-  const d=m.def, est=m.estimate, eng=d.engine||'llamacpp';
-  const memTag = est.measured ? '<span class="tag meas">measured</span>' : '<span class="tag est">estimated</span>';
-  const brk = est.measured
-    ? `weights ${gb(est.weights_mib)} · kv ${gb(est.kv_mib)} GB (est)`
-    : `weights ${gb(est.weights_mib)} + kv ${gb(est.kv_mib)} + overhead ${gb(est.overhead_mib)} GB`;
-  // fit bar: used-by-others vs this model vs free
-  const total = mem.total_mib, usedOther = Math.max(0, mem.used_mib - (m.running?est.total_mib:0));
-  const thisPct = Math.min(100, est.total_mib*100/total);
-  const usedPct = Math.min(100-thisPct, usedOther*100/total);
-  const fitClass = (!m.running && m.oom.would_oom) ? 'thisoom' : 'thisfit';
-  const fitBar = `<div class="fitbar">
-      <div class="seg used" style="width:${usedPct}%"></div>
-      <div class="seg ${fitClass}" style="width:${thisPct}%"></div></div>`;
-  const oomLine = (!m.running && m.oom.would_oom)
-    ? `<div class="oomnote">⚠ Needs ${gb(m.oom.needed_mib)} GB, only ${gb(m.oom.available_mib)} GB free — would OOM.</div>`
-    : (!m.running ? `<div class="okhead">Fits · ${gb(m.oom.headroom_mib)} GB headroom after load</div>` : '');
-
-  const el=document.createElement('div');
-  el.className='card'+(m.running?' running':'');
+function item(m){
+  const d=m.def,e=m.estimate,eng=d.engine||'llamacpp';
+  const tag=e.measured?'<span class="tag meas">measured</span>':'<span class="tag">est</span>';
+  const api=m.healthy?` · <a href="${location.protocol}//${location.hostname}:${d.host_port}/v1/models" target="_blank">api ↗</a>`:'';
+  const fit=(!m.running&&m.oom.would_oom)
+    ? `<div class="fitline oom">needs ${gb(m.oom.needed_mib)}, ${gb(m.oom.available_mib)} free</div>`
+    : (!m.running?`<div class="fitline ok">${gb(m.oom.headroom_mib)} GB headroom</div>`:'');
+  const el=document.createElement('div');el.className='item';
   el.innerHTML=`
-    <div class="title">
-      <h3>${esc(d.name)}</h3>
-      <div class="chips"><span class="chip eng-${eng}">${ENGINE_LABEL[eng]||eng}</span></div>
+    <div class="lead">
+      <div class="nm">${esc(d.name)} <span class="eng">${ENGINE[eng]||eng}</span> ${statusEl(m)}</div>
+      <div class="sub"><span class="mono">:${d.host_port}</span> · <span class="mono">${(+d.context).toLocaleString()}</span> ctx${eng==='llamacpp'?` · kv ${esc(d.kv_type)}`:''}${api}</div>
+      ${d.description?`<div class="desc">${esc(d.description)}</div>`:''}
+      <div class="acts">
+        ${m.running?`<button class="link warn" data-a="unload">Unload</button>`:`<button class="link" data-a="load"><b>Load</b></button>`}
+        <button class="link" data-a="logs">Logs</button>
+        <button class="link" data-a="edit">Edit</button>
+        <button class="link" data-a="del">Delete</button>
+        <label class="boot" title="Start on boot"><input type="checkbox" data-a="auto" ${d.autostart?'checked':''}> boot</label>
+      </div>
     </div>
-    <div class="chips">${statusPill(m)}${d.autostart?'<span class="chip">⏻ boot</span>':''}</div>
-    ${d.description?`<div class="desc">${esc(d.description)}</div>`:''}
-    <div class="memblock">
-      <div class="top"><div class="amt">${gb(est.total_mib)}<small>GB total</small></div>${memTag}</div>
-      ${fitBar}
-      <div class="brk">${brk}</div>
-      ${oomLine}
-    </div>
-    <div class="meta">
-      <span class="k">Port</span><span class="v">:${d.host_port}${m.healthy?` · <a href="${location.protocol}//${location.hostname}:${d.host_port}/v1/models" target="_blank">API ↗</a>`:''}</span>
-      <span class="k">Context</span><span class="v">${(+d.context).toLocaleString()} tokens${eng==='llamacpp'?` · KV ${esc(d.kv_type)}`:''}</span>
-      <span class="k">Image</span><span class="v">${esc(d.image||'(engine default)')}</span>
-    </div>
-    <div class="actions">
-      ${m.running?`<button class="danger" data-a="unload">■ Unload</button>`:`<button class="primary" data-a="load">▶ Load</button>`}
-      <button class="ghost" data-a="logs">Logs</button>
-      <button class="ghost" data-a="edit">Edit</button>
-      <button class="danger" data-a="del">Delete</button>
-      <label class="switch" title="Start on boot"><input type="checkbox" data-a="auto" ${d.autostart?'checked':''}> boot</label>
+    <div class="rt">
+      <div class="memnum mono">${gb(e.total_mib)}<span class="u">GB</span>${tag}</div>
+      ${fit}
     </div>`;
   el.querySelector('[data-a=load]')?.addEventListener('click',()=>loadModel(m));
   el.querySelector('[data-a=unload]')?.addEventListener('click',()=>unloadModel(d.name));
   el.querySelector('[data-a=logs]').addEventListener('click',()=>showLogs(d.name));
   el.querySelector('[data-a=edit]').addEventListener('click',()=>openEdit(d));
   el.querySelector('[data-a=del]').addEventListener('click',()=>delModel(d.name));
-  el.querySelector('[data-a=auto]').addEventListener('change',e=>setAuto(d.name,e.target.checked));
+  el.querySelector('[data-a=auto]').addEventListener('change',ev=>setAuto(d.name,ev.target.checked));
   return el;
 }
-
 async function refresh(){
-  if(!TOKEN){ showToken(); return; }
-  let st; try{ st=await api('/api/state'); }catch(e){ if(e.status!==401) toast('Connection lost — retrying…','err'); return; }
-  const mem=st.memory, pct=Math.min(100,Math.round(mem.used_mib*100/mem.total_mib));
-  const fill=$('memfill'); fill.style.width=pct+'%';
-  fill.className='fill'+(pct>=90?' hot':pct>=75?' warn':'');
-  $('memused').textContent=`${gb(mem.used_mib)} / ${gb(mem.total_mib)} GB used`;
-  $('mempct').textContent=pct+'%';
-  $('kAvail').innerHTML=`${gb(mem.available_mib)}<small>GB</small>`;
-  $('kTotal').innerHTML=`${gb(mem.total_mib)}<small>GB</small>`;
-  $('kSwap').innerHTML=`${gb(mem.swap_used_mib)}<small>/ ${gb(mem.swap_total_mib)} GB</small>`;
-  $('kDocker').innerHTML=`<span class="dot ${st.docker_ok?'ok':'bad'}"></span>${st.docker_ok?'OK':'down'}`;
-  $('count').textContent=st.models.length;
-  const grid=$('grid'); grid.innerHTML='';
-  if(!st.models.length){ grid.innerHTML=`<div class="empty"><div class="big">◇</div>No models yet.<br>Click <b>+ Add model</b> to register a GGUF or HuggingFace model.</div>`; return; }
-  st.models.forEach(m=>grid.appendChild(card(m,mem)));
+  if(!TOKEN){showToken();return;}
+  let st;try{st=await api('/api/state');}catch(e){if(e.status!==401)toast('Connection lost — retrying','err');return;}
+  const mem=st.memory,pct=Math.min(100,Math.round(mem.used_mib*100/mem.total_mib));
+  const f=$('memFill');f.style.width=pct+'%';f.className='fill'+(pct>=90?' hot':pct>=78?' warn':'');
+  $('memUsed').textContent=gb(mem.used_mib);$('memTotal').textContent=gb(mem.total_mib);
+  $('sAvail').textContent=gb(mem.available_mib)+' GB';
+  $('sSwap').textContent=gb(mem.swap_used_mib)+' / '+gb(mem.swap_total_mib)+' GB';
+  $('sDocker').textContent=st.docker_ok?'ok':'down';$('sDot').className='dot '+(st.docker_ok?'ok':'bad');
+  $('count').textContent=st.models.length?st.models.length:'';
+  const L=$('list');L.innerHTML='';
+  if(!st.models.length){L.innerHTML='<div class="empty">No models yet — click <b>Add model</b> to register a GGUF or HuggingFace model.</div>';return;}
+  st.models.forEach(m=>L.appendChild(item(m)));
 }
-
-// actions
 function loadModel(m){
-  if(m.oom.would_oom){
-    confirmDialog('Memory warning',
-      `<p><b>${esc(m.def.name)}</b> needs about <b>${gb(m.oom.needed_mib)} GB</b>, but only <b>${gb(m.oom.available_mib)} GB</b> is free.</p>
-       <p style="color:var(--danger)">Loading will very likely OOM and crash. Free memory first, or load anyway at your own risk.</p>`,
-      'Load anyway', ()=>doLoad(m.def.name,true));
+  if(m.oom.would_oom){confirmDialog('Memory warning',
+    `<p><b>${esc(m.def.name)}</b> needs ~<b>${gb(m.oom.needed_mib)} GB</b> but only <b>${gb(m.oom.available_mib)} GB</b> is free.</p>
+     <p style="color:var(--oom)">Loading will very likely OOM. Free memory first, or load anyway.</p>`,'Load anyway',()=>doLoad(m.def.name,true));
   } else doLoad(m.def.name,false);
 }
-async function doLoad(name,force){
-  try{ toast('Starting '+name+'… large models take several minutes','ok');
-    await api(`/api/models/${encodeURIComponent(name)}/load?force=${force}`,{method:'POST'}); setTimeout(refresh,700);
-  }catch(e){
-    if(e.status===409&&e.data){ confirmDialog('Memory warning',`<p>${esc(e.data.message||'Would OOM')}</p>`,'Load anyway',()=>doLoad(name,true)); }
-    else toast('Load failed: '+(e.data?.error||e.status),'err');
-  }
-}
-function unloadModel(name){ confirmDialog('Unload model',`<p>Stop and remove the container for <b>${esc(name)}</b>?</p>`,'Unload',async()=>{
-  try{ await api(`/api/models/${encodeURIComponent(name)}/unload`,{method:'POST'}); toast(name+' unloaded','ok'); refresh(); }
-  catch(e){ toast('Unload failed: '+(e.data?.error||e.status),'err'); }}); }
-async function setAuto(name,enabled){ try{ await api(`/api/models/${encodeURIComponent(name)}/autostart`,{method:'POST',body:{enabled}});
-  toast(`Boot autostart ${enabled?'enabled':'disabled'}`,'ok'); refresh(); }catch(e){ toast('Failed: '+(e.data?.error||e.status),'err'); refresh(); }}
-function delModel(name){ confirmDialog('Delete model',`<p>Remove <b>${esc(name)}</b>? (Unloads if running; GGUF files are not deleted.)</p>`,'Delete',async()=>{
-  try{ await api(`/api/models/${encodeURIComponent(name)}`,{method:'DELETE'}); toast(name+' removed','ok'); refresh(); }
-  catch(e){ toast('Delete failed: '+(e.data?.error||e.status),'err'); }}); }
-async function showLogs(name){ $('logsTitle').textContent='Logs · '+name; $('logsBody').textContent='loading…'; $('logsOverlay').classList.add('show');
-  try{ const d=await api(`/api/models/${encodeURIComponent(name)}/logs`); $('logsBody').textContent=d.logs||'(no logs)';
-    const b=$('logsBody'); b.scrollTop=b.scrollHeight; }catch(e){ $('logsBody').textContent='Error: '+(e.data?.error||e.status); } }
+async function doLoad(n,f){try{toast('Starting '+n+'…');await api(`/api/models/${encodeURIComponent(n)}/load?force=${f}`,{method:'POST'});setTimeout(refresh,700);}
+  catch(e){if(e.status===409&&e.data){confirmDialog('Memory warning',`<p>${esc(e.data.message||'Would OOM')}</p>`,'Load anyway',()=>doLoad(n,true));}else toast('Load failed: '+(e.data?.error||e.status),'err');}}
+function unloadModel(n){confirmDialog('Unload','<p>Stop and remove the container for <b>'+esc(n)+'</b>?</p>','Unload',async()=>{
+  try{await api(`/api/models/${encodeURIComponent(n)}/unload`,{method:'POST'});toast(n+' unloaded');refresh();}catch(e){toast('Unload failed','err');}});}
+async function setAuto(n,en){try{await api(`/api/models/${encodeURIComponent(n)}/autostart`,{method:'POST',body:{enabled:en}});toast('Boot '+(en?'on':'off'));refresh();}catch(e){toast('Failed','err');refresh();}}
+function delModel(n){confirmDialog('Delete','<p>Remove <b>'+esc(n)+'</b>? (Unloads if running; files not deleted.)</p>','Delete',async()=>{
+  try{await api(`/api/models/${encodeURIComponent(n)}`,{method:'DELETE'});toast(n+' removed');refresh();}catch(e){toast('Delete failed','err');}});}
+async function showLogs(n){$('logsTitle').textContent='Logs · '+n;$('logsBody').textContent='loading…';$('logsOverlay').classList.add('show');
+  try{const d=await api(`/api/models/${encodeURIComponent(n)}/logs`);$('logsBody').textContent=d.logs||'(no logs)';const b=$('logsBody');b.scrollTop=b.scrollHeight;}catch(e){$('logsBody').textContent='Error';}}
 $('logsClose').onclick=()=>$('logsOverlay').classList.remove('show');
 
-// engine selector
-function setEngine(eng){ curEngine=eng;
-  $('engSel').querySelectorAll('button').forEach(b=>b.classList.toggle('sel',b.dataset.eng===eng));
-  const isVllm = eng==='vllm';
-  $('llamaFields').style.display=isVllm?'none':'grid';
-  $('kvField').style.display=isVllm?'none':'flex';
-  $('vllmField').style.display=isVllm?'flex':'none';
-  $('pathHint').textContent = isVllm ? 'A HuggingFace model directory (or GGUF / HF id).' : 'The first GGUF shard (…-00001-of-000NN.gguf) or a single GGUF.';
-  $('imgHint').textContent = isVllm ? 'Blank uses vllm/vllm-openai:latest.' : 'An image containing llama-server (your CUDA build).';
-  $('f_path').placeholder = isVllm ? '/home/you/models/Qwen2.5-72B-Instruct' : '/home/you/models/.../model-00001-of-00004.gguf';
-}
+function setEngine(e){curEngine=e;$('engSel').querySelectorAll('button').forEach(b=>b.classList.toggle('sel',b.dataset.eng===e));
+  const v=e==='vllm';$('llamaFields').style.display=v?'none':'grid';$('kvField').style.display=v?'none':'flex';$('vllmField').style.display=v?'flex':'none';
+  $('pathHint').textContent=v?'— HuggingFace model directory':'— first GGUF shard';
+  $('imgHint').textContent=v?'— blank = vllm/vllm-openai:latest':'— your llama-server image';
+  $('f_path').placeholder=v?'/models/Qwen2.5-72B-Instruct':'/models/.../model-00001-of-00004.gguf';}
 $('engSel').querySelectorAll('button').forEach(b=>b.onclick=()=>setEngine(b.dataset.eng));
-
-function openEdit(d){
-  editing=d?d.name:null;
-  $('editTitle').textContent=d?'Edit model':'Add model';
-  setEngine(d?.engine||'llamacpp');
-  $('f_name').value=d?.name||''; $('f_name').disabled=!!d;
-  $('f_desc').value=d?.description||'';
-  $('f_path').value=d?.model_path||'';
-  $('f_image').value=d?.image||'';
-  $('f_port').value=d?.host_port??18080;
-  $('f_ctx').value=d?.context??8192;
-  $('f_ngl').value=d?.ngl??99;
-  $('f_threads').value=d?.threads??20;
-  $('f_kv').value=d?.kv_type||'f16';
-  $('f_gpu').value=d?.gpu_mem_util??0.90;
-  $('f_extra').value=(d?.extra_args||[]).join('\n');
-  $('f_auto').checked=d?.autostart||false;
-  $('editOverlay').classList.add('show');
-}
-$('addBtn').onclick=()=>openEdit(null);
-$('editCancel').onclick=()=>$('editOverlay').classList.remove('show');
-$('editSave').onclick=async()=>{
-  const extra=$('f_extra').value.split(/\n+/).map(s=>s.trim()).filter(Boolean);
-  const body={ name:$('f_name').value.trim(), description:$('f_desc').value.trim(), engine:curEngine,
-    model_path:$('f_path').value.trim(), image:$('f_image').value.trim(),
-    host_port:parseInt($('f_port').value)||18080, context:parseInt($('f_ctx').value)||8192,
-    ngl:parseInt($('f_ngl').value)||99, threads:parseInt($('f_threads').value)||20, kv_type:$('f_kv').value,
-    gpu_mem_util:parseFloat($('f_gpu').value)||0.90, extra_args:extra, autostart:$('f_auto').checked };
-  if(!body.name||!body.model_path){ toast('Name and model path are required','err'); return; }
-  if(curEngine==='llamacpp'&&!body.image){ toast('llama.cpp needs a Docker image','err'); return; }
-  try{ await api('/api/models',{method:'POST',body}); $('editOverlay').classList.remove('show'); toast('Saved','ok'); refresh(); }
-  catch(e){ toast('Save failed: '+(e.data?.error||e.status),'err'); }
-};
-
+function openEdit(d){editing=d?d.name:null;$('editTitle').textContent=d?'Edit model':'Add model';setEngine(d?.engine||'llamacpp');
+  $('f_name').value=d?.name||'';$('f_name').disabled=!!d;$('f_desc').value=d?.description||'';$('f_path').value=d?.model_path||'';
+  $('f_image').value=d?.image||'';$('f_port').value=d?.host_port??18080;$('f_ctx').value=d?.context??8192;
+  $('f_ngl').value=d?.ngl??99;$('f_threads').value=d?.threads??20;$('f_kv').value=d?.kv_type||'f16';$('f_gpu').value=d?.gpu_mem_util??0.90;
+  $('f_extra').value=(d?.extra_args||[]).join('\n');$('f_auto').checked=d?.autostart||false;$('editOverlay').classList.add('show');}
+$('addBtn').onclick=()=>openEdit(null);$('editCancel').onclick=()=>$('editOverlay').classList.remove('show');
+$('editSave').onclick=async()=>{const extra=$('f_extra').value.split(/\n+/).map(s=>s.trim()).filter(Boolean);
+  const body={name:$('f_name').value.trim(),description:$('f_desc').value.trim(),engine:curEngine,model_path:$('f_path').value.trim(),
+    image:$('f_image').value.trim(),host_port:parseInt($('f_port').value)||18080,context:parseInt($('f_ctx').value)||8192,
+    ngl:parseInt($('f_ngl').value)||99,threads:parseInt($('f_threads').value)||20,kv_type:$('f_kv').value,
+    gpu_mem_util:parseFloat($('f_gpu').value)||0.90,extra_args:extra,autostart:$('f_auto').checked};
+  if(!body.name||!body.model_path){toast('Name and model path required','err');return;}
+  if(curEngine==='llamacpp'&&!body.image){toast('llama.cpp needs an image','err');return;}
+  try{await api('/api/models',{method:'POST',body});$('editOverlay').classList.remove('show');toast('Saved');refresh();}catch(e){toast('Save failed','err');}};
 let confirmAction=null;
-function confirmDialog(title,html,okLabel,action){ $('confirmTitle').textContent=title; $('confirmMsg').innerHTML=html;
-  $('confirmOk').textContent=okLabel||'Confirm'; confirmAction=action; $('confirmOverlay').classList.add('show'); }
+function confirmDialog(t,h,ok,a){$('confirmTitle').textContent=t;$('confirmMsg').innerHTML=h;$('confirmOk').textContent=ok||'Confirm';confirmAction=a;$('confirmOverlay').classList.add('show');}
 $('confirmCancel').onclick=()=>$('confirmOverlay').classList.remove('show');
-$('confirmOk').onclick=async()=>{ $('confirmOverlay').classList.remove('show'); if(confirmAction) await confirmAction(); };
-document.querySelectorAll('.overlay').forEach(o=>o.addEventListener('click',e=>{ if(e.target===o) o.classList.remove('show'); }));
-
-if(!TOKEN) showToken();
-refresh(); setInterval(refresh, 2500);
+$('confirmOk').onclick=async()=>{$('confirmOverlay').classList.remove('show');if(confirmAction)await confirmAction();};
+document.querySelectorAll('.overlay').forEach(o=>o.addEventListener('click',e=>{if(e.target===o)o.classList.remove('show');}));
+if(location.hostname)$('host').textContent=location.hostname;
+if(!TOKEN)showToken();refresh();setInterval(refresh,2500);
 </script>
