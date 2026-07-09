@@ -1,6 +1,6 @@
 //! System memory sampling + per-model footprint estimation and OOM guarding.
 
-use crate::config::{Engine, ModelDef};
+use crate::config::{Engine, ModelDef, ModelKind};
 use crate::gguf;
 use serde::Serialize;
 use std::path::Path;
@@ -65,10 +65,12 @@ pub fn estimate(model: &ModelDef, overhead_mib: u64, total_system_mib: u64) -> M
 
     let mut estimated_total = weights_mib + kv_mib + overhead_mib;
 
-    // vLLM pre-reserves `gpu_memory_utilization` of memory for weights + KV
-    // cache regardless of the weight size, so its real footprint is at least
-    // that fraction of the machine's memory.
-    if model.engine == Engine::Vllm {
+    // vLLM LLMs pre-reserve `gpu_memory_utilization` of memory for weights + KV
+    // cache regardless of the weight size, so their real footprint is at least
+    // that fraction of the machine's memory. Embedding models are small and
+    // meant to run alongside an LLM, so we use their actual weight footprint
+    // instead (don't block them on the reservation).
+    if model.engine == Engine::Vllm && model.kind == ModelKind::Llm {
         let reserved = (model.gpu_mem_util_or_default() as f64 * total_system_mib as f64) as u64;
         if reserved > estimated_total {
             estimated_total = reserved;

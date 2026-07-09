@@ -23,6 +23,23 @@ impl Default for Engine {
     }
 }
 
+/// What a model is for. Purely a categorization for the UI + grouping; both
+/// kinds are served the same way (OpenAI-compatible container).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ModelKind {
+    /// Text-generation / chat model.
+    Llm,
+    /// Embedding model (serves /v1/embeddings).
+    Embedding,
+}
+
+impl Default for ModelKind {
+    fn default() -> Self {
+        ModelKind::Llm
+    }
+}
+
 impl Engine {
     /// Default Docker image when the model doesn't specify one.
     pub fn default_image(&self) -> &'static str {
@@ -98,6 +115,9 @@ pub struct ModelDef {
     pub name: String,
     #[serde(default)]
     pub description: String,
+    /// LLM or embedding model (for UI grouping).
+    #[serde(default)]
+    pub kind: ModelKind,
     #[serde(default)]
     pub engine: Engine,
     /// Path to the model on this host. For llama.cpp: the first GGUF shard (or a

@@ -66,6 +66,10 @@
   /* model list */
   .listhead { display: flex; align-items: baseline; gap: 10px; margin: 26px 0 2px; }
   .listhead .ct { font-size: 12px; color: var(--faint); }
+  .grouphead { display: flex; align-items: baseline; gap: 10px; margin-top: 24px; padding-bottom: 8px; border-bottom: 1px solid var(--line2); }
+  .grouphead:first-child { margin-top: 4px; }
+  .grouphead .ct { font-size: 12px; color: var(--faint); }
+  .groupempty { padding: 16px 2px 18px; color: var(--faint); font-size: 13px; border-bottom: 1px solid var(--line); }
   .list { border-top: 1px solid var(--line); }
   .item { border-bottom: 1px solid var(--line); padding: 18px 2px; display: grid;
     grid-template-columns: 1fr auto; gap: 8px 18px; align-items: start; }
@@ -165,7 +169,6 @@
     </div>
   </div>
 
-  <div class="listhead"><span class="lbl">Models</span><span class="ct mono" id="count"></span></div>
   <div class="list" id="list"></div>
   <div class="footer"><button class="link" id="logoutBtn">Forget token</button></div>
 </div>
@@ -174,6 +177,8 @@
 <div class="overlay" id="editOverlay"><div class="modal">
   <h3 id="editTitle">Add model</h3>
   <div class="body">
+    <label>Type
+      <div class="seg" id="kindSel"><button type="button" data-kind="llm" class="sel">LLM</button><button type="button" data-kind="embedding">Embedding</button></div></label>
     <label>Engine
       <div class="seg" id="engSel"><button type="button" data-eng="llamacpp" class="sel">llama.cpp</button><button type="button" data-eng="vllm">vLLM</button></div></label>
     <label>Name <span class="hint">— the model id API clients use</span>
@@ -230,7 +235,7 @@
 const $=(id)=>document.getElementById(id);
 let TOKEN=localStorage.getItem('mm_token')||(new URLSearchParams(location.search).get('token')||'');
 if(TOKEN) localStorage.setItem('mm_token',TOKEN);
-let editing=null, curEngine='llamacpp';
+let editing=null, curEngine='llamacpp', curKind='llm';
 const ENGINE={llamacpp:'llama.cpp',vllm:'vLLM'};
 function toast(m,k){const t=$('toast');t.textContent=m;t.className='show '+(k||'');clearTimeout(t._t);t._t=setTimeout(()=>t.className=t.className.replace('show','').trim(),3600);}
 function gb(m){return (m/1024).toFixed(1);}
@@ -298,10 +303,20 @@ async function refresh(){
   $('sAvail').textContent=gb(mem.available_mib)+' GB';
   $('sSwap').textContent=gb(mem.swap_used_mib)+' / '+gb(mem.swap_total_mib)+' GB';
   $('sDocker').textContent=st.docker_ok?'ok':'down';$('sDot').className='dot '+(st.docker_ok?'ok':'bad');
-  $('count').textContent=st.models.length?st.models.length:'';
   const L=$('list');L.innerHTML='';
   if(!st.models.length){L.innerHTML='<div class="empty">No models yet — click <b>Add model</b> to register a GGUF or HuggingFace model.</div>';return;}
-  st.models.forEach(m=>L.appendChild(item(m)));
+  const llms=st.models.filter(m=>(m.def.kind||'llm')==='llm');
+  const embs=st.models.filter(m=>m.def.kind==='embedding');
+  renderGroup(L,'LLMs',llms,null);
+  renderGroup(L,'Embedding models',embs, embs.length?null:'None yet — add one with Type = Embedding.');
+}
+function renderGroup(L,title,models,emptyMsg){
+  if(!models.length && !emptyMsg) return;
+  const h=document.createElement('div');h.className='grouphead';
+  h.innerHTML=`<span class="lbl">${title}</span><span class="ct mono">${models.length||''}</span>`;
+  L.appendChild(h);
+  if(!models.length){const e=document.createElement('div');e.className='groupempty';e.textContent=emptyMsg;L.appendChild(e);return;}
+  models.forEach(m=>L.appendChild(item(m)));
 }
 function loadModel(m){
   if(m.oom.would_oom){confirmDialog('Memory warning',
@@ -326,7 +341,9 @@ function setEngine(e){curEngine=e;$('engSel').querySelectorAll('button').forEach
   $('imgHint').textContent=v?'— blank = vllm/vllm-openai:latest':'— your llama-server image';
   $('f_path').placeholder=v?'/models/Qwen2.5-72B-Instruct':'/models/.../model-00001-of-00004.gguf';}
 $('engSel').querySelectorAll('button').forEach(b=>b.onclick=()=>setEngine(b.dataset.eng));
-function openEdit(d){editing=d?d.name:null;$('editTitle').textContent=d?'Edit model':'Add model';setEngine(d?.engine||'llamacpp');
+function setKind(k){curKind=k;$('kindSel').querySelectorAll('button').forEach(b=>b.classList.toggle('sel',b.dataset.kind===k));}
+$('kindSel').querySelectorAll('button').forEach(b=>b.onclick=()=>setKind(b.dataset.kind));
+function openEdit(d){editing=d?d.name:null;$('editTitle').textContent=d?'Edit model':'Add model';setKind(d?.kind||'llm');setEngine(d?.engine||'llamacpp');
   $('f_name').value=d?.name||'';$('f_name').disabled=!!d;$('f_desc').value=d?.description||'';$('f_path').value=d?.model_path||'';
   $('f_image').value=d?.image||'';$('f_port').value=d?.host_port??18080;$('f_ctx').value=d?.context??8192;
   $('f_ngl').value=d?.ngl??99;$('f_threads').value=d?.threads??20;$('f_kv').value=d?.kv_type||'f16';$('f_gpu').value=d?.gpu_mem_util??0.90;
@@ -335,7 +352,7 @@ function openEdit(d){editing=d?d.name:null;$('editTitle').textContent=d?'Edit mo
   $('f_auto').checked=d?.autostart||false;$('editOverlay').classList.add('show');}
 $('addBtn').onclick=()=>openEdit(null);$('editCancel').onclick=()=>$('editOverlay').classList.remove('show');
 $('editSave').onclick=async()=>{const extra=$('f_extra').value.split(/\n+/).map(s=>s.trim()).filter(Boolean);
-  const body={name:$('f_name').value.trim(),description:$('f_desc').value.trim(),engine:curEngine,model_path:$('f_path').value.trim(),
+  const body={name:$('f_name').value.trim(),description:$('f_desc').value.trim(),kind:curKind,engine:curEngine,model_path:$('f_path').value.trim(),
     image:$('f_image').value.trim(),host_port:parseInt($('f_port').value)||18080,context:parseInt($('f_ctx').value)||8192,
     ngl:parseInt($('f_ngl').value)||99,threads:parseInt($('f_threads').value)||20,kv_type:$('f_kv').value,
     gpu_mem_util:parseFloat($('f_gpu').value)||0.90,extra_args:extra,
