@@ -89,11 +89,15 @@ async fn main() -> Result<()> {
             .await
             .with_context(|| "loading TLS cert/key")?;
         axum_server::bind_rustls(addr, tls_config)
-            .serve(app.into_make_service())
+            .serve(app.into_make_service_with_connect_info::<SocketAddr>())
             .await?;
     } else {
         let listener = tokio::net::TcpListener::bind(addr).await?;
-        axum::serve(listener, app).await?;
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await?;
     }
     Ok(())
 }

@@ -78,6 +78,28 @@ async fn auth(
     let token = { state.config.lock().await.server.token.clone() };
     let provided = extract_token(&req);
     if provided.as_deref() == Some(token.as_str()) {
+        // Log every mutating call (who + what) so unexpected loads/unloads are
+        // traceable to a client.
+        if req.method() != axum::http::Method::GET {
+            let peer = req
+                .extensions()
+                .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+                .map(|c| c.0.to_string())
+                .unwrap_or_else(|| "unknown".into());
+            let ua = req
+                .headers()
+                .get("user-agent")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("")
+                .to_string();
+            tracing::info!(
+                "API {} {} from {} ua=\"{}\"",
+                req.method(),
+                req.uri().path(),
+                peer,
+                ua
+            );
+        }
         next.run(req).await
     } else {
         (
