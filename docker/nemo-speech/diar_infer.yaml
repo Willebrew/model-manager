@@ -1,0 +1,71 @@
+# Clustering diarization config for the speech server.
+#
+# Adapted from NeMo's standard offline inference config:
+#   examples/speaker_tasks/diarization/conf/inference/diar_infer_meeting.yaml
+#
+# Changes from upstream:
+#   - max_num_speakers 8 -> 12 (upstream is tuned for 3-5 speakers in a meeting)
+#   - save_embeddings True -> False (we only need labels, not the tensors)
+#   - dropped the `asr` section: that drives NeMo's own ASR-decoder diarization
+#     script, which would pull stt_en_conformer_ctc_large. We transcribe with
+#     Parakeet-TDT and merge word timestamps ourselves.
+#
+# `model_path` for vad/speaker_embeddings and both `???` fields are overwritten
+# at runtime by server.py with local checkpoint paths and per-request temp dirs.
+name: &name "ClusterDiarizer"
+
+# 0, not upstream's 1: worker processes pass tensors through /dev/shm, which
+# fails in containers with a small shm. We diarize one file per request, so the
+# cost is dominated by the model forward pass, not data loading.
+num_workers: 0
+sample_rate: 16000
+batch_size: 64
+device: null # null -> cuda if available, else cpu
+verbose: False
+
+diarizer:
+  manifest_filepath: ???
+  out_dir: ???
+  oracle_vad: False # If True, uses RTTM files from the manifest for speech activity
+  collar: 0.25 # Collar value for scoring
+  ignore_overlap: True # Consider or ignore overlap segments while scoring
+
+  vad:
+    model_path: vad_multilingual_marblenet # overwritten with a local .nemo path
+    external_vad_manifest: null
+
+    parameters: # Tuned parameters for CH109 (11 multi-speaker sessions as dev set)
+      window_length_in_sec: 0.63
+      shift_length_in_sec: 0.01
+      smoothing: False
+      overlap: 0.5
+      onset: 0.9 # Onset threshold for detecting the beginning of speech
+      offset: 0.5 # Offset threshold for detecting the end of speech
+      pad_onset: 0
+      pad_offset: 0
+      min_duration_on: 0 # Threshold for short speech segment deletion
+      min_duration_off: 0.6 # Threshold for small non-speech deletion
+      filter_speech_first: True
+
+  speaker_embeddings:
+    model_path: titanet_large # overwritten with a local .nemo path
+    parameters:
+      # Multi-scale embeddings: six windows from 3.0s down to 0.5s. Long windows
+      # give stable speaker identity, short ones give precise turn boundaries;
+      # affinity matrices from every scale are fused before clustering. This is
+      # what keeps accuracy up as the speaker count grows.
+      window_length_in_sec: [3.0, 2.5, 2.0, 1.5, 1.0, 0.5]
+      shift_length_in_sec: [1.5, 1.25, 1.0, 0.75, 0.5, 0.25]
+      multiscale_weights: [1, 1, 1, 1, 1, 1]
+      save_embeddings: False
+
+  clustering:
+    parameters:
+      oracle_num_speakers: False # If True, use num_speakers from the manifest
+      max_num_speakers: 12 # Upper bound; the actual count is estimated per file
+      enhanced_count_thres: 80
+      max_rp_threshold: 0.25
+      sparse_search_volume: 30
+      maj_vote_spk_count: False
+      chunk_cluster_count: 50 # Forced clusters per chunk in long-form audio
+      embeddings_per_chunk: 10000 # ~40 min of audio per chunk; lower if memory-bound

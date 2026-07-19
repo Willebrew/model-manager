@@ -33,12 +33,18 @@ logging.basicConfig(
 )
 log = logging.getLogger("nemo-speech")
 
-# Sortformer v1 is memory-bound and degrades past roughly this much audio.
-# Beyond it we still transcribe, but skip diarization rather than OOM.
-DEFAULT_MAX_DIAR_SECONDS = 720
+# Clustering diarization chunks long recordings, so there is no hard ceiling by
+# default. Sortformer is memory-bound and degrades past ~12 min; the launcher
+# lowers this when that backend is selected.
+DEFAULT_MAX_DIAR_SECONDS = 0
 
 ASR_HINTS = ("parakeet", "conformer", "citrinet", "canary", "asr")
-DIAR_HINTS = ("diar", "sortformer")
+# Clustering backend: TitaNet speaker embeddings + a MarbleNet VAD.
+EMB_HINTS = ("titanet", "ecapa", "speakerverification")
+VAD_HINTS = ("vad", "marblenet")
+SORTFORMER_HINTS = ("sortformer",)
+# Anything that is not the ASR checkpoint.
+NON_ASR_HINTS = EMB_HINTS + VAD_HINTS + SORTFORMER_HINTS + ("diar",)
 
 
 # --------------------------------------------------------------------------
@@ -69,6 +75,32 @@ def wav_duration(path: str) -> float:
 # --------------------------------------------------------------------------
 # speaker attribution
 # --------------------------------------------------------------------------
+
+def parse_rttm(path: str) -> list:
+    """Read a NeMo-written RTTM into {start,end,speaker} dicts.
+
+    Line layout: SPEAKER <uri> <ch> <start> <dur> <NA> <NA> <speaker> <NA> <NA>
+    """
+    segs = []
+    with open(path) as fh:
+        for line in fh:
+            f = line.split()
+            if len(f) < 8 or f[0] != "SPEAKER":
+                continue
+            try:
+                start, dur = float(f[3]), float(f[4])
+            except ValueError:
+                continue
+            label = f[7]
+            digits = "".join(ch for ch in label if ch.isdigit())
+            segs.append({
+                "start": start,
+                "end": start + dur,
+                "speaker": int(digits) if digits else 0,
+            })
+    segs.sort(key=lambda s: s["start"])
+    return segs
+
 
 def parse_segments(raw) -> list:
     """Normalize Sortformer output into {start,end,speaker} dicts.
@@ -218,7 +250,7 @@ class Engine:
             dev = "cpu"
         self.device = dev
 
-        asr_ref = find_ckpt(self.args.model_dir, self.args.asr, ASR_HINTS, DIAR_HINTS)
+        asr_ref = find_ckpt(self.args.model_dir, self.args.asr, ASR_HINTS, NON_ASR_HINTS)
         if not asr_ref:
             raise SystemExit(
                 f"no ASR checkpoint found in {self.args.model_dir} "
@@ -244,24 +276,74 @@ class Engine:
         log.info("asr model ready")
 
         if not self.args.no_diar:
-            diar_ref = find_ckpt(self.args.model_dir, self.args.diar, DIAR_HINTS, ())
-            if diar_ref:
-                log.info("loading diarization model: %s", diar_ref)
-                if os.path.exists(diar_ref):
-                    self.diar = SortformerEncLabelModel.restore_from(
-                        restore_path=diar_ref, map_location=dev, strict=False
-                    )
-                else:
-                    self.diar = SortformerEncLabelModel.from_pretrained(
-                        diar_ref, map_location=dev
-                    )
-                self.diar.eval()
-                log.info("diarization model ready")
+            if self.args.diar_backend == "clustering":
+                self._load_clustering()
             else:
-                log.warning("no diarization checkpoint found — diarization disabled")
+                diar_ref = find_ckpt(self.args.model_dir, self.args.diar, SORTFORMER_HINTS, ())
+                if diar_ref:
+                    log.info("loading diarization model: %s", diar_ref)
+                    if os.path.exists(diar_ref):
+                        self.diar = SortformerEncLabelModel.restore_from(
+                            restore_path=diar_ref, map_location=dev, strict=False
+                        )
+                    else:
+                        self.diar = SortformerEncLabelModel.from_pretrained(
+                            diar_ref, map_location=dev
+                        )
+                    self.diar.eval()
+                    log.info("diarization model ready")
+                else:
+                    log.warning("no sortformer checkpoint found — diarization disabled")
 
         self.ready = True
         log.info("all models ready")
+
+    def _load_clustering(self):
+        """Build the ClusteringDiarizer once: TitaNet embeddings + MarbleNet VAD,
+        multi-scale windows, spectral clustering.
+
+        The models are loaded here and reused for every request — `diarize()`
+        re-reads `out_dir` and writes its own manifest per call, so only the
+        output directory changes between requests.
+        """
+        from omegaconf import OmegaConf
+        from nemo.collections.asr.models import ClusteringDiarizer
+
+        cfg = OmegaConf.load(self.args.diar_config)
+
+        emb = find_ckpt(self.args.model_dir, self.args.emb, EMB_HINTS, ())
+        vad = find_ckpt(self.args.model_dir, self.args.vad, VAD_HINTS, EMB_HINTS)
+        if not emb:
+            log.warning("no speaker-embedding checkpoint (titanet) found — diarization disabled")
+            return
+        cfg.diarizer.speaker_embeddings.model_path = emb
+        if vad:
+            cfg.diarizer.vad.model_path = vad
+        else:
+            log.warning("no local VAD checkpoint — NeMo will fetch %s from NGC",
+                        cfg.diarizer.vad.model_path)
+        cfg.diarizer.clustering.parameters.max_num_speakers = self.args.max_speakers
+        cfg.device = self.device
+
+        # __init__ requires these to be set; every call overrides out_dir.
+        self._diar_workdir = tempfile.mkdtemp(prefix="diar-")
+        cfg.diarizer.manifest_filepath = os.path.join(self._diar_workdir, "manifest.json")
+        cfg.diarizer.out_dir = self._diar_workdir
+        with open(cfg.diarizer.manifest_filepath, "w") as fh:
+            fh.write("")
+
+        scales = list(cfg.diarizer.speaker_embeddings.parameters.window_length_in_sec)
+        log.info("loading diarization model: clustering (titanet=%s, vad=%s)",
+                 os.path.basename(str(emb)), os.path.basename(str(vad)) if vad else "NGC")
+        log.info("multi-scale windows %s, max_num_speakers=%d",
+                 scales, self.args.max_speakers)
+
+        self.diar_cfg = cfg
+        self.diar = ClusteringDiarizer(cfg=cfg)
+        if self.device == "cuda":
+            with contextlib.suppress(Exception):
+                self.diar = self.diar.to(self.device)
+        log.info("diarization model ready")
 
     # -- inference ---------------------------------------------------------
 
@@ -273,11 +355,50 @@ class Engine:
         stamps = getattr(hyp, "timestamp", None) or {}
         return text, stamps.get("word", []) or [], stamps.get("segment", []) or []
 
-    def _diarize(self, wav: str):
+    def _diarize(self, wav: str, num_speakers=None):
+        if self.args.diar_backend == "clustering":
+            return self._diarize_clustering(wav, num_speakers)
         raw = self.diar.diarize(audio=[wav], batch_size=1)
         return parse_segments(raw[0] if raw else [])
 
-    def run(self, wav: str, want_diar: bool):
+    def _diarize_clustering(self, wav: str, num_speakers=None):
+        """Run clustering diarization and read back the predicted RTTM."""
+        params = self.diar_cfg.diarizer.clustering.parameters
+        with tempfile.TemporaryDirectory(prefix="diar-run-") as td:
+            self.diar._diarizer_params.out_dir = td
+            prev_oracle = params.oracle_num_speakers
+            try:
+                if num_speakers:
+                    # Oracle mode needs our own manifest carrying the count.
+                    manifest = os.path.join(td, "manifest.json")
+                    with open(manifest, "w") as fh:
+                        json.dump({
+                            "audio_filepath": wav, "offset": 0, "duration": None,
+                            "label": "infer", "text": "-",
+                            "num_speakers": int(num_speakers),
+                            "rttm_filepath": None, "uem_filepath": None,
+                        }, fh)
+                        fh.write("\n")
+                    params.oracle_num_speakers = True
+                    self.diar._diarizer_params.manifest_filepath = manifest
+                    self.diar.diarize()
+                else:
+                    params.oracle_num_speakers = False
+                    # Without a manifest, diarize() writes one for these files.
+                    self.diar.diarize(paths2audio_files=[wav])
+            finally:
+                params.oracle_num_speakers = prev_oracle
+
+            stem = os.path.splitext(os.path.basename(wav))[0]
+            rttm = os.path.join(td, "pred_rttms", f"{stem}.rttm")
+            if not os.path.exists(rttm):
+                found = glob.glob(os.path.join(td, "pred_rttms", "*.rttm"))
+                if not found:
+                    return []
+                rttm = found[0]
+            return parse_rttm(rttm)
+
+    def run(self, wav: str, want_diar: bool, num_speakers=None):
         t0 = time.time()
         text, words, segments = self._transcribe(wav)
         result = {
@@ -300,7 +421,7 @@ class Engine:
                 result["warning"] = "no word timestamps available — cannot attribute speakers"
             else:
                 try:
-                    segs = self._diarize(wav)
+                    segs = self._diarize(wav, num_speakers)
                     if segs:
                         result["turns"] = to_turns(
                             attribute(words, segs), self.args.turn_gap
@@ -332,7 +453,15 @@ def build_app(engine: "Engine", model_name: str):
     def health():
         if not engine.ready:
             raise HTTPException(status_code=503, detail="loading")
-        return {"status": "ok", "model": model_name, "diarization": engine.diar is not None}
+        return {
+            "status": "ok",
+            "model": model_name,
+            "diarization": engine.diar is not None,
+            "diarization_backend": engine.args.diar_backend if engine.diar is not None else None,
+            "max_speakers": engine.args.max_speakers
+            if engine.diar is not None and engine.args.diar_backend == "clustering"
+            else (4 if engine.diar is not None else None),
+        }
 
     @app.get("/v1/models")
     def models():
@@ -355,6 +484,7 @@ def build_app(engine: "Engine", model_name: str):
         model: str = Form(default=model_name),
         response_format: str = Form(default="json"),
         diarize: str = Form(default="false"),
+        num_speakers: int = Form(default=None),   # known count -> oracle clustering
         language: str = Form(default=None),          # accepted, auto-detected by v3
         temperature: float = Form(default=0.0),      # accepted for compatibility
         timestamp_granularities: str = Form(default=None),
@@ -377,7 +507,7 @@ def build_app(engine: "Engine", model_name: str):
 
             async with engine.lock:
                 try:
-                    r = await asyncio.to_thread(engine.run, wav, want_diar)
+                    r = await asyncio.to_thread(engine.run, wav, want_diar, num_speakers)
                 except Exception as e:
                     log.exception("transcription failed")
                     raise HTTPException(status_code=500, detail=str(e))
@@ -428,7 +558,16 @@ def main():
     ap.add_argument("--model-dir", default="/model", help="directory of .nemo checkpoints")
     ap.add_argument("--served-model-name", default="nemo-speech")
     ap.add_argument("--asr", default="", help="ASR .nemo filename/path or HF id")
-    ap.add_argument("--diar", default="", help="diarization .nemo filename/path or HF id")
+    ap.add_argument("--diar-backend", default="clustering", choices=["clustering", "sortformer"],
+                    help="clustering = TitaNet embeddings + multi-scale clustering (many "
+                         "speakers); sortformer = end-to-end, max 4 speakers")
+    ap.add_argument("--emb", default="", help="speaker-embedding .nemo (TitaNet) for clustering")
+    ap.add_argument("--vad", default="", help="VAD .nemo (MarbleNet) for clustering")
+    ap.add_argument("--max-speakers", type=int, default=12,
+                    help="upper bound on speakers per recording (clustering backend)")
+    ap.add_argument("--diar-config", default="/app/diar_infer.yaml",
+                    help="NeMo clustering diarization config")
+    ap.add_argument("--diar", default="", help="sortformer .nemo filename/path or HF id")
     ap.add_argument("--no-diar", action="store_true", help="disable diarization entirely")
     ap.add_argument("--device", default="cuda", choices=["cuda", "cpu"])
     ap.add_argument("--bf16", action="store_true", default=True)
@@ -440,6 +579,11 @@ def main():
     ap.add_argument("--turn-gap", type=float, default=1.5,
                     help="merge same-speaker turns separated by less than this many seconds")
     args = ap.parse_args()
+
+    # Sortformer is memory-bound past ~12 min; clustering chunks and has no
+    # inherent ceiling, so only the former gets a default limit.
+    if args.diar_backend == "sortformer" and args.max_diar_seconds == 0:
+        args.max_diar_seconds = 720
 
     import uvicorn
     engine = Engine(args)

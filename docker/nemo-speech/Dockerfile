@@ -25,6 +25,7 @@ RUN pip install --no-cache-dir \
       fastapi "uvicorn[standard]" python-multipart soundfile
 
 COPY server.py /app/server.py
+COPY diar_infer.yaml /app/diar_infer.yaml
 WORKDIR /app
 
 # Unbuffered so Model Manager can read load-progress markers from the log.
