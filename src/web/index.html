@@ -178,9 +178,9 @@
   <h3 id="editTitle">Add model</h3>
   <div class="body">
     <label>Type
-      <div class="seg" id="kindSel"><button type="button" data-kind="llm" class="sel">LLM</button><button type="button" data-kind="embedding">Embedding</button></div></label>
+      <div class="seg" id="kindSel"><button type="button" data-kind="llm" class="sel">LLM</button><button type="button" data-kind="embedding">Embedding</button><button type="button" data-kind="speech">Speech</button></div></label>
     <label>Engine
-      <div class="seg" id="engSel"><button type="button" data-eng="llamacpp" class="sel">llama.cpp</button><button type="button" data-eng="vllm">vLLM</button></div></label>
+      <div class="seg" id="engSel"><button type="button" data-eng="llamacpp" class="sel">llama.cpp</button><button type="button" data-eng="vllm">vLLM</button><button type="button" data-eng="nemo">NeMo</button></div></label>
     <label>Name <span class="hint">— the model id API clients use</span>
       <input type="text" id="f_name" class="mono-in" placeholder="MiniMax-M2.7-UD-IQ4_XS"></label>
     <label>Description <input type="text" id="f_desc" placeholder="optional"></label>
@@ -190,7 +190,7 @@
       <input type="text" id="f_image" class="mono-in" placeholder="minimax-m27-longctx-108k"></label>
     <div class="row2">
       <label>Host port <input type="number" id="f_port" class="mono-in" value="18080"></label>
-      <label>Context <input type="number" id="f_ctx" class="mono-in" value="8192"></label>
+      <label id="ctxField">Context <input type="number" id="f_ctx" class="mono-in" value="8192"></label>
     </div>
     <div class="row2" id="llamaFields">
       <label>GPU layers <input type="number" id="f_ngl" class="mono-in" value="99"></label>
@@ -236,7 +236,7 @@ const $=(id)=>document.getElementById(id);
 let TOKEN=localStorage.getItem('mm_token')||(new URLSearchParams(location.search).get('token')||'');
 if(TOKEN) localStorage.setItem('mm_token',TOKEN);
 let editing=null, curEngine='llamacpp', curKind='llm';
-const ENGINE={llamacpp:'llama.cpp',vllm:'vLLM'};
+const ENGINE={llamacpp:'llama.cpp',vllm:'vLLM',nemo:'NeMo'};
 function toast(m,k){const t=$('toast');t.textContent=m;t.className='show '+(k||'');clearTimeout(t._t);t._t=setTimeout(()=>t.className=t.className.replace('show','').trim(),3600);}
 function gb(m){return (m/1024).toFixed(1);}
 function esc(s){return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
@@ -255,7 +255,7 @@ function statusEl(m){
   return '<span class="status stop"><span class="dot"></span>Stopped</span>';
 }
 function item(m){
-  const d=m.def,e=m.estimate,eng=d.engine||'llamacpp';
+  const d=m.def,e=m.estimate,eng=d.engine||'llamacpp',kind=d.kind||'llm';
   const tag=e.measured?'<span class="tag meas">measured</span>':'<span class="tag">est</span>';
   const apiLink=m.healthy?` · <a href="http://${location.hostname}:${d.host_port}/v1/models" target="_blank" rel="noopener">api ↗</a>`:'';
   const fit=(!m.running&&m.oom.would_oom)
@@ -271,7 +271,7 @@ function item(m){
   el.innerHTML=`
     <div class="lead">
       <div class="nm">${esc(d.name)} <span class="eng">${ENGINE[eng]||eng}</span> ${statusEl(m)}</div>
-      <div class="sub"><span class="mono">:${d.host_port}</span> · <span class="mono">${(+d.context).toLocaleString()}</span> ctx${eng==='llamacpp'?` · kv ${esc(d.kv_type)}`:''}${apiLink}</div>
+      <div class="sub"><span class="mono">:${d.host_port}</span>${kind==='speech'?' · transcription + diarization':` · <span class="mono">${(+d.context).toLocaleString()}</span> ctx${eng==='llamacpp'?` · kv ${esc(d.kv_type)}`:''}`}${apiLink}</div>
       ${d.description?`<div class="desc">${esc(d.description)}</div>`:''}
       ${loading}
       <div class="acts">
@@ -307,8 +307,10 @@ async function refresh(){
   if(!st.models.length){L.innerHTML='<div class="empty">No models yet — click <b>Add model</b> to register a GGUF or HuggingFace model.</div>';return;}
   const llms=st.models.filter(m=>(m.def.kind||'llm')==='llm');
   const embs=st.models.filter(m=>m.def.kind==='embedding');
+  const spch=st.models.filter(m=>m.def.kind==='speech');
   renderGroup(L,'LLMs',llms,null);
   renderGroup(L,'Embedding models',embs, embs.length?null:'None yet — add one with Type = Embedding.');
+  renderGroup(L,'Speech models',spch, spch.length?null:'None yet — add one with Type = Speech.');
 }
 function renderGroup(L,title,models,emptyMsg){
   if(!models.length && !emptyMsg) return;
@@ -336,12 +338,18 @@ async function showLogs(n){$('logsTitle').textContent='Logs · '+n;$('logsBody')
 $('logsClose').onclick=()=>$('logsOverlay').classList.remove('show');
 
 function setEngine(e){curEngine=e;$('engSel').querySelectorAll('button').forEach(b=>b.classList.toggle('sel',b.dataset.eng===e));
-  const v=e==='vllm';$('llamaFields').style.display=v?'none':'grid';$('kvField').style.display=v?'none':'flex';$('vllmField').style.display=v?'flex':'none';
-  $('pathHint').textContent=v?'— HuggingFace model directory':'— first GGUF shard';
-  $('imgHint').textContent=v?'— blank = vllm/vllm-openai:latest':'— your llama-server image';
-  $('f_path').placeholder=v?'/models/Qwen2.5-72B-Instruct':'/models/.../model-00001-of-00004.gguf';}
+  const v=e==='vllm',n=e==='nemo',lc=e==='llamacpp';
+  $('llamaFields').style.display=lc?'grid':'none';$('kvField').style.display=lc?'flex':'none';
+  $('vllmField').style.display=v?'flex':'none';$('ctxField').style.display=n?'none':'flex';
+  $('pathHint').textContent=n?'— directory of .nemo checkpoints':(v?'— HuggingFace model directory':'— first GGUF shard');
+  $('imgHint').textContent=n?'— blank = nemo-speech-spark:latest':(v?'— blank = vllm/vllm-openai:latest':'— your llama-server image');
+  $('f_path').placeholder=n?'/home/you/models/speech':(v?'/models/Qwen2.5-72B-Instruct':'/models/.../model-00001-of-00004.gguf');
+  // Speech is only served by the NeMo engine, and vice versa — keep them in sync.
+  if(n&&curKind!=='speech')setKind('speech');}
 $('engSel').querySelectorAll('button').forEach(b=>b.onclick=()=>setEngine(b.dataset.eng));
-function setKind(k){curKind=k;$('kindSel').querySelectorAll('button').forEach(b=>b.classList.toggle('sel',b.dataset.kind===k));}
+function setKind(k){curKind=k;$('kindSel').querySelectorAll('button').forEach(b=>b.classList.toggle('sel',b.dataset.kind===k));
+  if(k==='speech'&&curEngine!=='nemo')setEngine('nemo');
+  else if(k!=='speech'&&curEngine==='nemo')setEngine('llamacpp');}
 $('kindSel').querySelectorAll('button').forEach(b=>b.onclick=()=>setKind(b.dataset.kind));
 function openEdit(d){editing=d?d.name:null;$('editTitle').textContent=d?'Edit model':'Add model';setKind(d?.kind||'llm');setEngine(d?.engine||'llamacpp');
   $('f_name').value=d?.name||'';$('f_name').disabled=!!d;$('f_desc').value=d?.description||'';$('f_path').value=d?.model_path||'';

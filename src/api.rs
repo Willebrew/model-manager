@@ -225,6 +225,23 @@ async fn load_phase(docker: &Docker, def: &ModelDef) -> String {
                 "Starting…".into()
             }
         }
+        crate::config::Engine::Nemo => {
+            if has("application startup complete") || has("uvicorn running") {
+                "Starting API server".into()
+            } else if has("diarization model ready") {
+                "Diarization ready".into()
+            } else if has("loading diarization model") {
+                "Loading diarization model".into()
+            } else if has("asr model ready") {
+                "ASR ready".into()
+            } else if has("loading asr model") {
+                "Loading ASR model".into()
+            } else if has("importing nemo") {
+                "Importing NeMo".into()
+            } else {
+                "Starting…".into()
+            }
+        }
     }
 }
 

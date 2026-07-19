@@ -317,7 +317,7 @@ pub fn model_weight_bytes(model_path: &Path) -> Result<u64> {
             let entry = entry?;
             let p = entry.path();
             if let Some(ext) = p.extension().and_then(|e| e.to_str()) {
-                if matches!(ext, "safetensors" | "bin" | "gguf" | "pt") {
+                if matches!(ext, "safetensors" | "bin" | "gguf" | "pt" | "nemo") {
                     // Follow symlinks (HF cache snapshots symlink into ../blobs).
                     total += std::fs::metadata(&p)?.len();
                 }

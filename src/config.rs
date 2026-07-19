@@ -7,7 +7,7 @@ use std::path::PathBuf;
 /// discover "our" containers and never touch unrelated ones.
 pub const CONTAINER_PREFIX: &str = "modelmgr-";
 
-/// Inference engine that serves a model. Both expose an OpenAI-compatible API.
+/// Inference engine that serves a model. All expose an OpenAI-compatible API.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Engine {
@@ -15,6 +15,9 @@ pub enum Engine {
     Llamacpp,
     /// vLLM OpenAI server (HuggingFace-format models, and some GGUF).
     Vllm,
+    /// NVIDIA NeMo speech server (`.nemo` checkpoints) exposing
+    /// `/v1/audio/transcriptions`. Used for ASR + speaker diarization.
+    Nemo,
 }
 
 impl Default for Engine {
@@ -32,6 +35,9 @@ pub enum ModelKind {
     Llm,
     /// Embedding model (serves /v1/embeddings).
     Embedding,
+    /// Speech model: transcription + optional speaker diarization
+    /// (serves /v1/audio/transcriptions).
+    Speech,
 }
 
 impl Default for ModelKind {
@@ -47,6 +53,8 @@ impl Engine {
             // No universal default llama.cpp image — user supplies their build.
             Engine::Llamacpp => "",
             Engine::Vllm => "vllm/vllm-openai:latest",
+            // Built locally from docker/nemo-speech (no upstream arm64 image).
+            Engine::Nemo => "nemo-speech-spark:latest",
         }
     }
 }
@@ -250,6 +258,23 @@ impl ModelDef {
                     self.context.to_string(),
                     "--gpu-memory-utilization".into(),
                     format!("{:.2}", self.gpu_mem_util_or_default()),
+                ];
+                a.extend(self.extra_args.iter().cloned());
+                a
+            }
+            // Our speech server takes a directory of `.nemo` checkpoints and
+            // auto-detects the ASR and diarization models inside it; extra_args
+            // can pin them explicitly (--asr / --diar).
+            Engine::Nemo => {
+                let mut a = vec![
+                    "--host".into(),
+                    "0.0.0.0".into(),
+                    "--port".into(),
+                    self.host_port.to_string(),
+                    "--model-dir".into(),
+                    model_ref.into(),
+                    "--served-model-name".into(),
+                    self.name.clone(),
                 ];
                 a.extend(self.extra_args.iter().cloned());
                 a

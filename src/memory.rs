@@ -8,6 +8,11 @@ use sysinfo::System;
 
 const MIB: u64 = 1024 * 1024;
 
+/// Extra allowance (MiB) for a NeMo speech server: the PyTorch CUDA context,
+/// cuDNN workspaces, and audio feature/decoder buffers, none of which show up
+/// in the checkpoint size. Replaced by `measured_peak_mib` after a real load.
+const SPEECH_RUNTIME_MIB: u64 = 2560;
+
 #[derive(Serialize, Clone, Debug)]
 pub struct MemSnapshot {
     pub total_mib: u64,
@@ -51,9 +56,24 @@ pub fn estimate(model: &ModelDef, overhead_mib: u64, total_system_mib: u64) -> M
     let weights_mib = gguf::model_weight_bytes(path).map(|b| b / MIB).unwrap_or(0);
 
     // KV hyperparameters come from GGUF metadata (llama.cpp) or config.json (vLLM).
+    // Speech models (NeMo) have no KV cache — their footprint is weights plus a
+    // fixed PyTorch/cuDNN runtime allowance for audio feature and decode buffers.
+    if model.engine == Engine::Nemo || model.kind == ModelKind::Speech {
+        let total = weights_mib + overhead_mib + SPEECH_RUNTIME_MIB;
+        return MemEstimate {
+            weights_mib,
+            kv_mib: 0,
+            overhead_mib: overhead_mib + SPEECH_RUNTIME_MIB,
+            total_mib: model.measured_peak_mib.unwrap_or(total),
+            measured: model.measured_peak_mib.is_some(),
+            note: Some("speech model: no KV cache; includes PyTorch runtime".into()),
+        };
+    }
+
     let info = match model.engine {
         Engine::Llamacpp => gguf::resolve_gguf(path).and_then(|g| gguf::parse_metadata(&g)),
         Engine::Vllm => gguf::parse_hf_config(path),
+        Engine::Nemo => unreachable!("handled above"),
     };
     let (kv_mib, mut note) = match info {
         Ok(info) => (
