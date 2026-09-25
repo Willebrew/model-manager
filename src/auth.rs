@@ -163,7 +163,7 @@ impl AuthState {
 
 pub fn hash_password(password: &str) -> Result<String> {
     use argon2::password_hash::{PasswordHasher, SaltString};
-    let params = argon2::Params::new(65_536, 3, 1, None).context("argon2 params")?;
+    let params = argon2::Params::new(65_536, 3, 1, None).map_err(|e| anyhow::anyhow!("argon2 params: {e}"))?;
     let argon2 = argon2::Argon2::new(
         argon2::Algorithm::Argon2id,
         argon2::Version::V0x13,
@@ -198,7 +198,7 @@ pub fn secret_key() -> Result<[u8; 32]> {
     if p.exists() {
         let raw = std::fs::read(&p).with_context(|| format!("reading {}", p.display()))?;
         let bytes = base64::engine::general_purpose::STANDARD
-            .decode(raw.trim())
+            .decode(String::from_utf8_lossy(&raw).trim())
             .context("decoding secret.key")?;
         return bytes
             .try_into()

@@ -265,9 +265,16 @@ async fn gw_auth(
         peer: peer_ip,
     };
     req.extensions_mut().insert(ctx);
-    req.extensions_mut().insert(permit);
+    // The handler takes the permit out of this shared slot and holds it in
+    // the response stream, so the slot is freed when the stream ends.
+    req.extensions_mut()
+        .insert(PermitSlot(Arc::new(Mutex::new(Some(permit)))));
     next.run(req).await
 }
+
+/// Carries the per-key concurrency permit out of the middleware.
+#[derive(Clone)]
+struct PermitSlot(Arc<Mutex<Option<tokio::sync::OwnedSemaphorePermit>>>);
 
 // ---------- handlers ----------
 
@@ -315,6 +322,10 @@ async fn proxy(State(state): State<SharedState>, req: Request) -> Response {
         Some(c) => c,
         None => return openai_err("invalid api key", StatusCode::UNAUTHORIZED),
     };
+    let permit = req
+        .extensions()
+        .get::<PermitSlot>()
+        .and_then(|s| s.0.lock().ok().and_then(|mut g| g.take()));
     let method = req.method().clone();
     let path = req.uri().path().to_string();
     if method == Method::GET && path.ends_with("/models") {
@@ -424,8 +435,17 @@ async fn proxy(State(state): State<SharedState>, req: Request) -> Response {
         builder = builder.header("x-ratelimit-remaining", "999999");
         builder = builder.header("x-ratelimit-reset", "0");
     }
-    let body_stream =
-        audited_stream(scanned, ctx, path, req_model, status.as_u16(), start, usage);
+    // The permit is released when the stream is fully consumed.
+    let body_stream = audited_stream(
+        scanned,
+        ctx,
+        path,
+        req_model,
+        status.as_u16(),
+        start,
+        usage,
+        permit,
+    );
     match builder.body(Body::from_stream(body_stream)) {
         Ok(r) => r,
         Err(e) => openai_err(&format!("stream: {e}"), StatusCode::INTERNAL_SERVER_ERROR),
@@ -503,10 +523,12 @@ fn audited_stream<S>(
     status: u16,
     start: Instant,
     usage: Arc<Mutex<Option<(u64, u64)>>>,
+    _permit: Option<tokio::sync::OwnedSemaphorePermit>,
 ) -> impl futures_util::Stream<Item = Result<bytes::Bytes, std::io::Error>>
 where
     S: futures_util::Stream<Item = Result<bytes::Bytes, std::io::Error>>,
 {
+    let _permit = _permit;
     let mut audited = false;
     s.chain(stream::iter(std::iter::once(Ok::<bytes::Bytes, std::io::Error>(
         bytes::Bytes::new(),
@@ -896,7 +918,10 @@ mod tests {
             peer: Ipv4Addr::LOCALHOST.into(),
         };
         let usage = Arc::new(Mutex::new(None));
-        let out = audited_stream(s, ctx, "/v1/chat/completions".into(), "m".into(), 200, Instant::now(), usage);
+        let out = audited_stream(
+            s, ctx, "/v1/chat/completions".into(), "m".into(), 200,
+            Instant::now(), usage, None,
+        );
         let got: Vec<u8> = out
             .map(|c| c.unwrap().to_vec())
             .fold(Vec::new(), |mut a, c| async move {
