@@ -23,7 +23,7 @@ On a 128 GB Spark a single 4-bit 200B-class model can occupy ~117 GB. Load a sec
 - 🛑 **OOM guard** — a load that won't fit is blocked with a clear explanation; override with one click if you really mean it.
 - 🚀 **One-click load / unload** of model server containers.
 - ⏻ **Boot autostart** toggle per model.
-- 🔒 **Access token** so only people with the token can control your models.
+- 🔒 **Password + TOTP login** (Argon2id / RFC 6238), cookie sessions, IP lockout — no bearer tokens.
 - 📜 **Live container logs** in the UI.
 
 ## How it works
@@ -62,23 +62,44 @@ cargo build --release
 ./target/release/model-manager
 ```
 
-On startup it prints your dashboard URL and access token:
-
-```
-  Local:    https://127.0.0.1:8600/
-  Network:  https://192.168.1.78:8600/   (open this from your Mac)
-  Token:    iO4EUzsK4eexYdOTFHdYiSo9IODdCZJ5ESTzc4ls
-  Note:     self-signed cert — your browser will warn once; click through.
-```
-
-Open the Network URL from any device on your LAN and paste the token (or use the
-`?token=…` link to log straight in).
-
-Print the token any time:
+On startup it prints your dashboard URL. Sign in with a password (+ TOTP):
 
 ```bash
-model-manager --print-token
+model-manager set-password   # once, on the server
+model-manager setup-totp     # once; prints the otpauth URI + QR once
 ```
+
+The session cookie (`mm_session`) is HttpOnly/Secure/SameSite=Strict, with a
+15 min idle and 8 h absolute timeout. Failed logins lock the peer IP out after
+5 tries for 15 min. The old shared `token`/`?token=` path is gone.
+
+Local automation can authenticate over loopback with a hashed admin key:
+
+```bash
+model-manager admin-key rotate   # prints the key once; store its use, not in the repo
+curl -H "X-MM-Admin: mma_…" http://127.0.0.1:8600/api/state
+```
+
+### Gateway (OpenAI-compatible API for clients)
+
+The old Cursor-only adapter is now a real gateway on `[gateway]` (default
+`127.0.0.1:8610`). Every route requires a per-client `mmk_` key and a peer IP
+inside `allow_cidrs` (default: loopback + tailnet). Keys are created on the
+server and shown once; only their SHA-256 is stored:
+
+```bash
+model-manager key create --name will-mac            # openai profile (passthrough)
+model-manager key create --name cursor --profile cursor
+model-manager key list
+model-manager key revoke <id>
+```
+
+`bind` accepts an IP, `0.0.0.0`, or `tailscale` (resolved via `tailscale ip -4`).
+Each key carries a `profile`: `openai` forwards bytes verbatim (Grok CLI,
+generic clients); `cursor` applies the Cursor Responses→Chat translation and
+model-alias rewrite. Every request writes one JSON audit line (key id, peer,
+path, model, status, token usage, duration — never prompt text). Bodies are
+capped at 32 MB and each key is limited to 16 concurrent requests.
 
 ## Configuration
 
@@ -88,12 +109,20 @@ token. Models are added from the UI, but you can also edit the file directly:
 
 ```toml
 [server]
-bind = "0.0.0.0"
+bind = "127.0.0.1"        # or "tailscale" / "0.0.0.0"
 port = 8600
 tls = true                # serve HTTPS with a self-signed cert (auto-generated)
-token = "…"
+# password_hash / totp_secret_enc / admin_key_hash are written by the CLI,
+# never edited by hand.
 overhead_mib = 2560       # fixed overhead added to each estimate
 safety_margin_mib = 2048  # keep this much free; less than this = OOM warning
+
+[gateway]
+enabled = true
+bind = "tailscale"
+port = 8610
+allow_cidrs = ["127.0.0.0/8", "100.64.0.0/10", "fd7a:115c:a1e0::/48"]
+# [[gateway.keys]] entries are created by `model-manager key create`.
 
 # A llama.cpp (GGUF) model
 [[models]]
@@ -143,8 +172,8 @@ from its `*.safetensors`/`*.bin`, KV from its `config.json`).
 
 ## HTTP API
 
-All `/api/*` routes (except `/api/health`) require `Authorization: Bearer <token>`
-or `?token=<token>`.
+All `/api/*` routes (except `/api/health`, `/api/login`, `/api/logout`) require
+the `mm_session` cookie, or `X-MM-Admin` from a loopback peer.
 
 | Method | Path | Purpose |
 |---|---|---|
@@ -160,12 +189,14 @@ or `?token=<token>`.
 ## Security note
 
 The dashboard controls processes on your machine and binds to your LAN by
-default. It serves **HTTPS** with an auto-generated self-signed cert (your
-browser warns once — click through, or import the cert from
-`~/.config/model-manager/cert.pem`). The access token gates every action — treat
-it like a password, and don't reuse a system/sudo password for it. For untrusted
-networks, set `bind = "127.0.0.1"` and reach it over SSH, or front it with a
-reverse proxy that has a real certificate.
+default is loopback. It serves **HTTPS** with an auto-generated self-signed cert
+(your browser warns once — click through, or import the cert from
+`~/.config/model-manager/cert.pem`). Login is Argon2id password + optional TOTP;
+the TOTP secret is stored AES-256-GCM-encrypted under
+`~/.config/model-manager/secret.key` (0600). Note this protects config *copies
+and backups* — a compromise of the running user still yields the key file. For
+tailnet access set `bind = "tailscale"`; for untrusted networks keep loopback
+and reach it over SSH.
 
 ## License
 
