@@ -194,12 +194,16 @@ fn key_cmd(config: &mut config::Config, op: &KeyOp) -> Result<()> {
             }
         }
         KeyOp::Revoke { id } => {
-            let Some(k) = config.gateway.keys.iter_mut().find(|k| k.id == *id) else {
+            let Some(idx) = config.gateway.keys.iter().position(|k| k.id == *id) else {
                 anyhow::bail!("no key with id {id}");
             };
-            k.revoked = true;
+            config.gateway.keys[idx].revoked = true;
+            let (kid, kname) = (
+                config.gateway.keys[idx].id.clone(),
+                config.gateway.keys[idx].name.clone(),
+            );
             config.save()?;
-            println!("revoked {} ({})", k.id, k.name);
+            println!("revoked {kid} ({kname})");
         }
     }
     Ok(())
