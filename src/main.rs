@@ -234,9 +234,8 @@ fn read_password(prompt: &str) -> Result<String> {
         Err(_) => {
             eprint!("{prompt}");
             let mut s = String::new();
-            std::io::Read::read_to_string(&mut std::io::stdin(), &mut s)
-                .context("reading password from stdin")?;
-            Ok(s.lines().next().unwrap_or("").to_string())
+            std::io::stdin().read_line(&mut s).context("reading password")?;
+            Ok(s.trim_end().to_string())
         }
     }
 }
