@@ -227,10 +227,23 @@ fn chrono_free(unix: u64) -> String {
     format!("{y}-{m:02}-{d:02} {:02}:{:02}", secs / 3600, (secs % 3600) / 60)
 }
 
+fn read_password(prompt: &str) -> Result<String> {
+    match rpassword::prompt_password(prompt) {
+        Ok(p) => Ok(p),
+        // No TTY (scripts/pipes): fall back to stdin lines.
+        Err(_) => {
+            eprint!("{prompt}");
+            let mut s = String::new();
+            std::io::Read::read_to_string(&mut std::io::stdin(), &mut s)
+                .context("reading password from stdin")?;
+            Ok(s.lines().next().unwrap_or("").to_string())
+        }
+    }
+}
+
 fn set_password(config: &mut config::Config) -> Result<()> {
-    let p1 = rpassword::prompt_password("New dashboard password: ")
-        .context("reading password")?;
-    let p2 = rpassword::prompt_password("Repeat password: ").context("reading password")?;
+    let p1 = read_password("New dashboard password: ")?;
+    let p2 = read_password("Repeat password: ")?;
     if p1.is_empty() {
         anyhow::bail!("empty password");
     }
