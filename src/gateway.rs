@@ -72,7 +72,7 @@ struct GwCtx {
     key_id: String,
     key_name: String,
     profile: String,
-    peer: IpAddr,
+    peer: String,
 }
 
 pub fn advertised_id(alias: &str, context: u64) -> String {
@@ -258,11 +258,30 @@ async fn gw_auth(
         tracing::warn!("gateway: 429 concurrency cap for key {}", key.id);
         return openai_err("too many concurrent requests", StatusCode::TOO_MANY_REQUESTS);
     };
+    // Behind `tailscale serve` the peer is 127.0.0.1; the real tailnet client
+    // is identified by the injected headers.
+    let ts_user = req
+        .headers()
+        .get("tailscale-user-login")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    let xff = req
+        .headers()
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    let peer_label = match (ts_user.is_empty(), xff.is_empty()) {
+        (false, _) => format!("{peer_ip} ts:{ts_user}"),
+        (true, false) => format!("{peer_ip} xff:{xff}"),
+        _ => peer_ip.to_string(),
+    };
     let ctx = GwCtx {
         key_id: key.id.clone(),
         key_name: key.name.clone(),
         profile: key.profile.clone(),
-        peer: peer_ip,
+        peer: peer_label,
     };
     req.extensions_mut().insert(ctx);
     // The handler takes the permit out of this shared slot and holds it in
@@ -916,7 +935,7 @@ mod tests {
             key_id: "k".into(),
             key_name: "n".into(),
             profile: "openai".into(),
-            peer: Ipv4Addr::LOCALHOST.into(),
+            peer: "127.0.0.1".into(),
         };
         let usage = Arc::new(Mutex::new(None));
         let out = audited_stream(
