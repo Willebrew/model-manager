@@ -16,7 +16,7 @@ use crate::config::{resolve_bind, sanitize, GatewayKey, ModelKind};
 use crate::docker;
 use axum::body::Body;
 use axum::extract::{ConnectInfo, Request, State};
-use axum::http::{header, HeaderMap, Method, StatusCode};
+use axum::http::{header, Method, StatusCode};
 use axum::middleware::{from_fn_with_state, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get, post};
