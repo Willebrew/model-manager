@@ -27,6 +27,10 @@ pub struct AppState {
     pub http: reqwest::Client,
     /// In-flight loads, keyed by model name, for live progress reporting.
     pub loading: Mutex<HashMap<String, LoadInfo>>,
+    /// Sessions, login lockouts, TOTP anti-replay.
+    pub auth: crate::auth::AuthState,
+    /// Per-key gateway concurrency limiter.
+    pub gateway: Arc<crate::gateway::GatewayShared>,
 }
 
 /// Snapshot taken when a load starts, so we can report progress as a fraction
@@ -50,12 +54,14 @@ pub fn router(state: SharedState) -> Router {
         .route("/api/models/:name/autostart", post(set_autostart))
         .route("/api/models/:name/context", post(set_context))
         .route("/api/models/:name/logs", get(model_logs))
-        .route("/api/cursor", get(get_cursor).post(post_cursor))
+        .route("/api/gateway", get(get_gateway).post(post_gateway))
         .layer(from_fn_with_state(state.clone(), auth));
 
     Router::new()
         .route("/", get(index))
         .route("/api/health", get(|| async { Json(json!({"ok": true})) }))
+        .route("/api/login", post(login))
+        .route("/api/logout", post(logout))
         .merge(protected)
         .with_state(state)
 }
@@ -71,104 +77,223 @@ async fn index() -> impl IntoResponse {
     )
 }
 
-/// Bearer-token gate for every mutating/reading API call.
+/// Session-cookie gate for every API call. Two paths in:
+///   - `mm_session` cookie with a live server-side session (dashboard), or
+///   - `X-MM-Admin: <key>` from a loopback peer whose SHA-256 matches
+///     `[server] admin_key_hash` (local automation).
+/// Mutating requests additionally require the Origin (if present) to match
+/// the Host header — CSRF protection for the cookie path.
 async fn auth(
     State(state): State<SharedState>,
     req: axum::extract::Request,
     next: Next,
 ) -> Response {
-    let token = { state.config.lock().await.server.token.clone() };
-    let provided = extract_token(&req);
-    if provided.as_deref() == Some(token.as_str()) {
-        // Log every mutating call (who + what) so unexpected loads/unloads are
-        // traceable to a client.
-        if req.method() != axum::http::Method::GET {
-            let peer = req
-                .extensions()
-                .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
-                .map(|c| c.0.to_string())
-                .unwrap_or_else(|| "unknown".into());
-            let ua = req
-                .headers()
-                .get("user-agent")
-                .and_then(|v| v.to_str().ok())
-                .unwrap_or("")
-                .to_string();
-            tracing::info!(
-                "API {} {} from {} ua=\"{}\"",
-                req.method(),
-                req.uri().path(),
-                peer,
-                ua
-            );
-        }
-        next.run(req).await
-    } else {
-        (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({"error": "invalid or missing access token"})),
+    let peer_ip = req
+        .extensions()
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .map(|c| c.0.ip())
+        .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
+
+    // Origin check first: a present-but-mismatched Origin is always a 403.
+    if req.method() != axum::http::Method::GET
+        && req.method() != axum::http::Method::HEAD
+        && !origin_ok(&req)
+    {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "origin does not match host"})),
         )
-            .into_response()
+            .into_response();
     }
+
+    let mut authed = false;
+
+    // Loopback admin key (hashed in config; never the key itself).
+    if peer_ip.is_loopback() {
+        let admin_hash = { state.config.lock().await.server.admin_key_hash.clone() };
+        if let (Some(want), Some(got)) = (
+            admin_hash,
+            req.headers()
+                .get("x-mm-admin")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string()),
+        ) {
+            if crate::auth::ct_eq(&crate::auth::sha256_hex(got.as_bytes()), &want) {
+                authed = true;
+            }
+        }
+    }
+
+    if !authed {
+        if let Some(token) = cookie(&req, "mm_session") {
+            authed = state.auth.check_session(&token);
+        }
+    }
+
+    if !authed {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"error": "login required"})),
+        )
+            .into_response();
+    }
+
+    // Log every mutating call (who + what) so unexpected loads/unloads are
+    // traceable to a client.
+    if req.method() != axum::http::Method::GET {
+        let ua = req
+            .headers()
+            .get("user-agent")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        tracing::info!(
+            "API {} {} from {} ua=\"{}\"",
+            req.method(),
+            req.uri().path(),
+            peer_ip,
+            ua
+        );
+    }
+    next.run(req).await
 }
 
-fn extract_token(req: &axum::extract::Request) -> Option<String> {
-    // Authorization: Bearer <token>
-    if let Some(h) = req.headers().get("authorization") {
-        if let Ok(s) = h.to_str() {
-            if let Some(t) = s.strip_prefix("Bearer ") {
-                return Some(t.to_string());
-            }
-        }
-    }
-    // ?token=<token> fallback (handy for quick curl / links)
-    if let Some(q) = req.uri().query() {
-        for pair in q.split('&') {
-            if let Some(v) = pair.strip_prefix("token=") {
-                return Some(percent_decode(v));
-            }
+/// If an Origin header is present, its host[:port] must equal the Host header.
+/// Absent Origin (curl, scripts) is fine — no cookies are sent cross-origin.
+fn origin_ok(req: &axum::extract::Request) -> bool {
+    let Some(origin) = req
+        .headers()
+        .get("origin")
+        .and_then(|v| v.to_str().ok())
+    else {
+        return true;
+    };
+    let host = req
+        .headers()
+        .get("host")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    // Strip scheme, take host[:port].
+    let o = origin
+        .split("://")
+        .nth(1)
+        .unwrap_or(origin)
+        .split('/')
+        .next()
+        .unwrap_or("");
+    o == host
+}
+
+fn cookie(req: &axum::extract::Request, name: &str) -> Option<String> {
+    let hdr = req.headers().get("cookie")?.to_str().ok()?;
+    for part in hdr.split(';') {
+        let part = part.trim();
+        if let Some(v) = part.strip_prefix(&format!("{name}=")) {
+            return Some(v.to_string());
         }
     }
     None
 }
 
-/// Minimal application/x-www-form-urlencoded decode for query tokens, so a
-/// token containing characters like `!` (`%21`) still matches.
-fn percent_decode(s: &str) -> String {
-    let b = s.as_bytes();
-    let mut out = Vec::with_capacity(b.len());
-    let mut i = 0;
-    let hex = |c: u8| -> Option<u8> {
-        match c {
-            b'0'..=b'9' => Some(c - b'0'),
-            b'a'..=b'f' => Some(c - b'a' + 10),
-            b'A'..=b'F' => Some(c - b'A' + 10),
-            _ => None,
+// ---------- login / logout ----------
+
+#[derive(Deserialize)]
+struct LoginBody {
+    password: String,
+    #[serde(default)]
+    totp: String,
+}
+
+async fn login(
+    State(state): State<SharedState>,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    Json(body): Json<LoginBody>,
+) -> Response {
+    let ip = peer.ip();
+    if state.auth.is_locked(ip) {
+        tracing::warn!("login locked out: {ip}");
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(json!({"error": "too many failures; locked for 15 minutes"})),
+        )
+            .into_response();
+    }
+    let (pw_hash, totp_enc) = {
+        let cfg = state.config.lock().await;
+        (
+            cfg.server.password_hash.clone(),
+            cfg.server.totp_secret_enc.clone(),
+        )
+    };
+    let Some(hash) = pw_hash else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "no password set — run `model-manager set-password` on the server"})),
+        )
+            .into_response();
+    };
+    let pw_ok = crate::auth::verify_password(&hash, &body.password);
+    // TOTP only enforced once configured; before that password alone works so
+    // first-run setup can complete from the dashboard.
+    let totp_ok = match &totp_enc {
+        None => true,
+        Some(enc) => {
+            let secret = crate::auth::secret_key()
+                .and_then(|k| crate::auth::open(&k, enc))
+                .unwrap_or_default();
+            if secret.is_empty() {
+                false
+            } else {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                match crate::auth::verify_totp(&secret, &body.totp, now) {
+                    Some(step) => state.auth.claim_totp_step(step),
+                    None => false,
+                }
+            }
         }
     };
-    while i < b.len() {
-        match b[i] {
-            b'%' if i + 2 < b.len() => match (hex(b[i + 1]), hex(b[i + 2])) {
-                (Some(h), Some(l)) => {
-                    out.push(h * 16 + l);
-                    i += 3;
-                }
-                _ => {
-                    out.push(b[i]);
-                    i += 1;
-                }
-            },
-            b'+' => {
-                out.push(b' ');
-                i += 1;
-            }
-            c => {
-                out.push(c);
-                i += 1;
-            }
+    if !pw_ok || !totp_ok {
+        let backoff = state.auth.record(ip, false);
+        tracing::warn!("login failed from {ip}");
+        if backoff > 0 {
+            tokio::time::sleep(Duration::from_millis(backoff)).await;
         }
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"error": "invalid password or code"})),
+        )
+            .into_response();
     }
-    String::from_utf8_lossy(&out).into_owned()
+    state.auth.record(ip, true);
+    let token = state.auth.new_session();
+    tracing::info!("login ok from {ip}");
+    (
+        [(
+            axum::http::header::SET_COOKIE,
+            format!(
+                "mm_session={token}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=28800"
+            ),
+        )],
+        Json(json!({"ok": true})),
+    )
+        .into_response()
+}
+
+async fn logout(State(state): State<SharedState>, req: axum::extract::Request) -> Response {
+    if let Some(t) = cookie(&req, "mm_session") {
+        state.auth.drop_session(&t);
+    }
+    (
+        [(
+            axum::http::header::SET_COOKIE,
+            "mm_session=; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=0".to_string(),
+        )],
+        Json(json!({"ok": true})),
+    )
+        .into_response()
 }
 
 // ----- response models -----
@@ -374,11 +499,12 @@ async fn get_state(State(state): State<SharedState>) -> impl IntoResponse {
             .find(|v| v.def.kind == crate::config::ModelKind::Llm && v.running && v.healthy)
             .map(|v| v.def.context as u64)
             .unwrap_or(262144);
-        crate::cursor::snapshot(
-            cfg.cursor.enabled,
-            cfg.cursor.port,
-            &cfg.cursor.model_alias,
-            &cfg.server.token,
+        crate::gateway::snapshot(
+            cfg.gateway.enabled,
+            cfg.gateway.port,
+            &cfg.gateway.bind,
+            &cfg.gateway.model_alias,
+            &cfg.gateway.keys,
             ctx,
         )
     };
@@ -391,8 +517,8 @@ async fn get_state(State(state): State<SharedState>) -> impl IntoResponse {
     })
 }
 
-async fn get_cursor(State(state): State<SharedState>) -> impl IntoResponse {
-    let (enabled, port, alias, token, ctx) = {
+async fn get_gateway(State(state): State<SharedState>) -> impl IntoResponse {
+    let (enabled, port, bind, alias, keys, ctx) = {
         let cfg = state.config.lock().await;
         let ctx = cfg
             .models
@@ -401,21 +527,22 @@ async fn get_cursor(State(state): State<SharedState>) -> impl IntoResponse {
             .map(|m| m.context as u64)
             .unwrap_or(262144);
         (
-            cfg.cursor.enabled,
-            cfg.cursor.port,
-            cfg.cursor.model_alias.clone(),
-            cfg.server.token.clone(),
+            cfg.gateway.enabled,
+            cfg.gateway.port,
+            cfg.gateway.bind.clone(),
+            cfg.gateway.model_alias.clone(),
+            cfg.gateway.keys.clone(),
             ctx,
         )
     };
-    Json(crate::cursor::snapshot(enabled, port, &alias, &token, ctx))
+    Json(crate::gateway::snapshot(enabled, port, &bind, &alias, &keys, ctx))
 }
 
-async fn post_cursor(
+async fn post_gateway(
     State(state): State<SharedState>,
-    Json(body): Json<crate::cursor::CursorToggle>,
+    Json(body): Json<crate::gateway::GatewayToggle>,
 ) -> impl IntoResponse {
-    match crate::cursor::set_enabled(state, body.enabled).await {
+    match crate::gateway::set_enabled(state, body.enabled).await {
         Ok(v) => Json(v).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -832,5 +959,135 @@ async fn model_logs(
     match docker::logs(&state.docker, &def, 200).await {
         Ok(text) => Json(json!({"logs": text})).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::Request;
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use tower::ServiceExt;
+
+    fn state() -> SharedState {
+        Arc::new(AppState {
+            config: Mutex::new(Config::default()),
+            docker: crate::docker::connect().expect("docker client"),
+            sys: Mutex::new(System::new()),
+            http: reqwest::Client::new(),
+            loading: Mutex::new(HashMap::new()),
+            auth: crate::auth::AuthState::default(),
+            gateway: Arc::new(crate::gateway::GatewayShared::default()),
+        })
+    }
+
+    fn req(uri: &str, method: &str) -> Request<Body> {
+        let mut r = Request::builder()
+            .uri(uri)
+            .method(method)
+            .body(Body::empty())
+            .unwrap();
+        r.extensions_mut().insert(axum::extract::ConnectInfo(
+            SocketAddr::from((Ipv4Addr::LOCALHOST, 9)),
+        ));
+        r
+    }
+
+    #[tokio::test]
+    async fn no_cookie_401_and_query_token_ignored() {
+        let st = state();
+        let app = router(st);
+        let r = app
+            .clone()
+            .oneshot(req("/api/state", "GET"))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+        // The old ?token= path is gone — even a valid-looking query gets 401.
+        let r = app
+            .oneshot(req("/api/state?token=whatever", "GET"))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn session_cookie_works() {
+        let st = state();
+        let tok = st.auth.new_session();
+        let app = router(st);
+        let mut r = req("/api/state", "GET");
+        r.headers_mut().insert(
+            "cookie",
+            format!("mm_session={tok}").parse().unwrap(),
+        );
+        let resp = app.oneshot(r).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn login_503_without_password() {
+        let st = state();
+        let app = router(st);
+        let mut r = req("/api/login", "POST");
+        r.headers_mut()
+            .insert("content-type", "application/json".parse().unwrap());
+        let mut r = r;
+        *r.body_mut() = Body::from(r#"{"password":"x","totp":"000000"}"#);
+        let resp = app.oneshot(r).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn origin_mismatch_403_on_post() {
+        let st = state();
+        let tok = st.auth.new_session();
+        let app = router(st);
+        let mut r = req("/api/models/x/unload", "POST");
+        r.headers_mut()
+            .insert("cookie", format!("mm_session={tok}").parse().unwrap());
+        r.headers_mut()
+            .insert("origin", "https://evil.example".parse().unwrap());
+        r.headers_mut().insert("host", "127.0.0.1:8600".parse().unwrap());
+        r.headers_mut()
+            .insert("content-type", "application/json".parse().unwrap());
+        *r.body_mut() = Body::from("{}");
+        let resp = app.clone().oneshot(r).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        // Matching origin passes the check (then 404s on unknown model).
+        let mut r2 = req("/api/models/x/unload", "POST");
+        r2.headers_mut()
+            .insert("cookie", format!("mm_session={tok}").parse().unwrap());
+        r2.headers_mut()
+            .insert("origin", "https://127.0.0.1:8600".parse().unwrap());
+        r2.headers_mut().insert("host", "127.0.0.1:8600".parse().unwrap());
+        r2.headers_mut()
+            .insert("content-type", "application/json".parse().unwrap());
+        *r2.body_mut() = Body::from("{}");
+        let resp2 = app.oneshot(r2).await.unwrap();
+        assert_eq!(resp2.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn loopback_admin_key() {
+        let st = state();
+        let key = "mma_test-admin-key";
+        {
+            let mut cfg = st.config.lock().await;
+            cfg.server.admin_key_hash = Some(crate::auth::sha256_hex(key.as_bytes()));
+        }
+        let app = router(st);
+        let mut r = req("/api/state", "GET");
+        r.headers_mut()
+            .insert("x-mm-admin", key.parse().unwrap());
+        let resp = app.clone().oneshot(r).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        // Wrong key → 401.
+        let mut r2 = req("/api/state", "GET");
+        r2.headers_mut()
+            .insert("x-mm-admin", "mma_wrong".parse().unwrap());
+        let resp2 = app.oneshot(r2).await.unwrap();
+        assert_eq!(resp2.status(), StatusCode::UNAUTHORIZED);
     }
 }

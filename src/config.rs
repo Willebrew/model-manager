@@ -1,5 +1,4 @@
 use anyhow::{Context, Result};
-use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -90,11 +89,22 @@ pub struct ServerConfig {
     pub tls_cert_path: Option<String>,
     #[serde(default)]
     pub tls_key_path: Option<String>,
-    /// Shared access token required by every mutating API call. Generated on
-    /// first run. Anyone on the LAN can reach the port, so this is what stops
-    /// a random device from starting/stopping models.
-    #[serde(default = "gen_token")]
-    pub token: String,
+    /// Deprecated: the old shared bearer token. Removed from the config by
+    /// `model-manager set-password`; only kept here so old configs still parse.
+    /// Never used for auth anymore.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
+    /// Argon2id hash of the dashboard password (`model-manager set-password`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password_hash: Option<String>,
+    /// TOTP secret, AES-256-GCM-encrypted under `secret.key` (base64 nonce+ct).
+    /// Set by `model-manager setup-totp`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub totp_secret_enc: Option<String>,
+    /// SHA-256 of the local admin key (`X-MM-Admin` header, loopback only).
+    /// Set by `model-manager admin-key rotate`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admin_key_hash: Option<String>,
     /// Fixed memory overhead (MiB) to add on top of weights+KV when estimating
     /// a model's footprint: CUDA context, compute buffers, fragmentation.
     #[serde(default = "default_overhead_mib")]
@@ -130,10 +140,98 @@ impl Default for CursorConfig {
     }
 }
 
-impl CursorConfig {
-    pub fn is_off(&self) -> bool {
-        !self.enabled
+/// Authenticated OpenAI-compatible gateway (`src/gateway.rs`), the successor
+/// to the Cursor-only adapter. Per-client `mmk_` keys, CIDR allowlist, audit.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GatewayConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// IP to bind, "tailscale" (this host's 100.x address, resolved at
+    /// startup), or "0.0.0.0". Default loopback.
+    #[serde(default = "default_gateway_bind")]
+    pub bind: String,
+    #[serde(default = "default_cursor_port")]
+    pub port: u16,
+    /// CIDRs allowed to talk to the gateway. Rejected with 403 before auth.
+    #[serde(default = "default_gateway_cidrs")]
+    pub allow_cidrs: Vec<String>,
+    /// Stable model id advertised to clients; rewritten to the loaded LLM.
+    #[serde(default = "default_cursor_alias")]
+    pub model_alias: String,
+    /// Per-client API keys. Only the SHA-256 of the secret is stored.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub keys: Vec<GatewayKey>,
+    /// Max concurrent requests per key.
+    #[serde(default = "default_gateway_concurrency")]
+    pub max_concurrency: u32,
+}
+
+/// A gateway API key. The secret is `mmk_<id>_<random>`; only its SHA-256
+/// hex digest is kept here.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GatewayKey {
+    pub id: String,
+    pub name: String,
+    /// SHA-256 hex of the secret part (never the secret itself).
+    pub hash: String,
+    /// Unix seconds.
+    pub created_at: u64,
+    #[serde(default)]
+    pub revoked: bool,
+    /// "openai" = byte-faithful passthrough; "cursor" = Responses→Chat
+    /// translation + alias rewrites for Cursor clients.
+    #[serde(default = "default_key_profile")]
+    pub profile: String,
+}
+
+impl Default for GatewayConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            bind: default_gateway_bind(),
+            port: default_cursor_port(),
+            allow_cidrs: default_gateway_cidrs(),
+            model_alias: default_cursor_alias(),
+            keys: Vec::new(),
+            max_concurrency: default_gateway_concurrency(),
+        }
     }
+}
+
+fn default_gateway_bind() -> String {
+    "127.0.0.1".to_string()
+}
+fn default_gateway_cidrs() -> Vec<String> {
+    vec![
+        "127.0.0.0/8".to_string(),
+        "::1/128".to_string(),
+        "100.64.0.0/10".to_string(),
+        "fd7a:115c:a1e0::/48".to_string(),
+    ]
+}
+fn default_gateway_concurrency() -> u32 {
+    16
+}
+fn default_key_profile() -> String {
+    "openai".to_string()
+}
+
+/// Resolve a bind string ("tailscale", or an IP literal) to an IpAddr.
+pub fn resolve_bind(s: &str) -> Result<std::net::IpAddr> {
+    let s = s.trim();
+    if s.eq_ignore_ascii_case("tailscale") {
+        let out = std::process::Command::new("tailscale")
+            .arg("ip")
+            .arg("-4")
+            .output()
+            .context("running `tailscale ip -4`")?;
+        let ip = String::from_utf8_lossy(&out.stdout);
+        let ip = ip.lines().next().unwrap_or("").trim();
+        return ip
+            .parse()
+            .with_context(|| format!("tailscale returned unusable ip {ip:?}"));
+    }
+    s.parse().with_context(|| format!("invalid bind address {s:?}"))
 }
 
 fn default_cursor_port() -> u16 {
@@ -144,7 +242,7 @@ fn default_cursor_alias() -> String {
 }
 
 fn default_bind() -> String {
-    "0.0.0.0".to_string()
+    "127.0.0.1".to_string()
 }
 fn default_port() -> u16 {
     8600
@@ -157,14 +255,6 @@ fn default_overhead_mib() -> u64 {
 }
 fn default_safety_mib() -> u64 {
     2048
-}
-
-pub fn gen_token() -> String {
-    const CHARS: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-    let mut rng = rand::thread_rng();
-    (0..40)
-        .map(|_| CHARS[rng.gen_range(0..CHARS.len())] as char)
-        .collect()
 }
 
 /// A model the user has registered. Everything needed to launch a server
@@ -471,9 +561,13 @@ pub struct Config {
     pub server: ServerConfig,
     #[serde(default)]
     pub models: Vec<ModelDef>,
-    /// Removable. See `CursorConfig`.
-    #[serde(default, skip_serializing_if = "CursorConfig::is_off")]
-    pub cursor: CursorConfig,
+    /// Legacy `[cursor]` section — parsed only so it can be migrated forward
+    /// into `[gateway]` on load. Never serialized.
+    #[serde(default, skip_serializing)]
+    pub cursor: Option<CursorConfig>,
+    /// Authenticated OpenAI gateway. See `GatewayConfig`.
+    #[serde(default)]
+    pub gateway: GatewayConfig,
 }
 
 fn default_server() -> ServerConfig {
@@ -483,7 +577,10 @@ fn default_server() -> ServerConfig {
         tls: true,
         tls_cert_path: None,
         tls_key_path: None,
-        token: gen_token(),
+        token: None,
+        password_hash: None,
+        totp_secret_enc: None,
+        admin_key_hash: None,
         overhead_mib: default_overhead_mib(),
         safety_margin_mib: default_safety_mib(),
     }
@@ -494,7 +591,8 @@ impl Default for Config {
         Config {
             server: default_server(),
             models: Vec::new(),
-            cursor: CursorConfig::default(),
+            cursor: None,
+            gateway: GatewayConfig::default(),
         }
     }
 }
@@ -521,13 +619,29 @@ impl Config {
         if path.exists() {
             let text = std::fs::read_to_string(&path)
                 .with_context(|| format!("reading config {}", path.display()))?;
-            let cfg: Config = toml::from_str(&text)
+            let mut cfg: Config = toml::from_str(&text)
                 .with_context(|| format!("parsing config {}", path.display()))?;
+            cfg.migrate();
             Ok(cfg)
         } else {
             let cfg = Config::default();
             cfg.save()?;
             Ok(cfg)
+        }
+    }
+
+    /// Fold legacy config sections forward. Currently: `[cursor]` → `[gateway]`.
+    fn migrate(&mut self) {
+        if let Some(c) = self.cursor.take() {
+            if c.enabled {
+                self.gateway.enabled = true;
+            }
+            if self.gateway.port == default_cursor_port() || self.gateway.port == 0 {
+                self.gateway.port = c.port;
+            }
+            if self.gateway.model_alias == default_cursor_alias() {
+                self.gateway.model_alias = c.model_alias;
+            }
         }
     }
 
@@ -538,7 +652,15 @@ impl Config {
                 .with_context(|| format!("creating config dir {}", dir.display()))?;
         }
         let text = toml::to_string_pretty(self).context("serializing config")?;
-        std::fs::write(&path, text).with_context(|| format!("writing config {}", path.display()))?;
+        // Atomic write (tmp + rename) at 0600: the config holds key hashes.
+        let tmp = path.with_extension("toml.tmp");
+        std::fs::write(&tmp, text).with_context(|| format!("writing {}", tmp.display()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600)).ok();
+        }
+        std::fs::rename(&tmp, &path).with_context(|| format!("renaming to {}", path.display()))?;
         Ok(())
     }
 

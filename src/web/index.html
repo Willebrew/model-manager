@@ -185,14 +185,14 @@
     </div>
     <div class="cursorbar" id="cursorBar">
       <label class="boot" style="margin:0;padding-left:0" title="Expose the loaded LLM to Cursor via a Funnel HTTPS adapter">
-        <input type="checkbox" id="cursorToggle"> Cursor
+        <input type="checkbox" id="cursorToggle"> Gateway
       </label>
-      <span class="cursorhint" id="cursorHint">Off — Cursor’s cloud cannot reach Spark directly; this publishes a public HTTPS OpenAI endpoint.</span>
+      <span class="cursorhint" id="cursorHint">Off — authenticated OpenAI-compatible gateway for external clients (Cursor, Grok CLI).</span>
     </div>
   </div>
 
   <div class="list" id="list"></div>
-  <div class="footer"><button class="link" id="logoutBtn">Forget token</button></div>
+  <div class="footer"><button class="link" id="logoutBtn">Sign out</button></div>
 </div>
 
 <!-- Add/Edit -->
@@ -246,11 +246,13 @@
   <div class="foot"><button id="confirmCancel">Cancel</button><button class="solid" id="confirmOk">Confirm</button></div>
 </div></div>
 
-<div class="overlay" id="tokenOverlay"><div class="modal" style="max-width:440px">
-  <h3>Access token</h3>
-  <div class="body"><p style="margin:0;color:var(--muted)">This dashboard controls models on this machine. Enter the token from the server terminal.</p>
-    <label>Token <input type="password" id="tokenInput" class="mono-in" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="paste token"></label></div>
-  <div class="foot"><button class="solid" id="tokenSave">Connect</button></div>
+<div class="overlay" id="loginOverlay"><div class="modal" style="max-width:440px">
+  <h3>Sign in</h3>
+  <div class="body"><p style="margin:0;color:var(--muted)">This dashboard controls models on this machine.</p>
+    <p id="loginHint" style="color:var(--warn,#f5a);font-size:12px;display:none"></p>
+    <label>Password <input type="password" id="pwInput" class="mono-in" autocomplete="current-password" placeholder="password"></label>
+    <label>Code <input type="text" id="totpInput" class="mono-in" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="6-digit code"></label></div>
+  <div class="foot"><button class="solid" id="loginBtn">Sign in</button></div>
 </div></div>
 
 <div class="overlay" id="logsOverlay"><div class="modal" style="max-width:840px">
@@ -262,8 +264,6 @@
 
 <script>
 const $=(id)=>document.getElementById(id);
-let TOKEN=localStorage.getItem('mm_token')||(new URLSearchParams(location.search).get('token')||'');
-if(TOKEN) localStorage.setItem('mm_token',TOKEN);
 let editing=null, curEngine='llamacpp', curKind='llm';
 const ENGINE={llamacpp:'llama.cpp',vllm:'vLLM',nemo:'NeMo',audiogen:'AudioGen',trellis:'TRELLIS'};
 let familySel={};
@@ -278,13 +278,25 @@ function variantLabel(d){return (d.variant||'').trim()||d.name;}
 function toast(m,k){const t=$('toast');t.textContent=m;t.className='show '+(k||'');clearTimeout(t._t);t._t=setTimeout(()=>t.className=t.className.replace('show','').trim(),3600);}
 function gb(m){return (m/1024).toFixed(1);}
 function esc(s){return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
-async function api(p,o={}){o.headers=Object.assign({'Authorization':'Bearer '+TOKEN},o.headers||{});
-  if(o.body&&typeof o.body!=='string'){o.headers['Content-Type']='application/json';o.body=JSON.stringify(o.body);}
+async function api(p,o={}){
+  if(o.body&&typeof o.body!=='string'){o.headers=Object.assign({'Content-Type':'application/json'},o.headers||{});o.body=JSON.stringify(o.body);}
   const r=await fetch(p,o);let d=null;try{d=await r.json();}catch(e){}
-  if(r.status===401){showToken();throw{status:401,d};} if(!r.ok)throw{status:r.status,data:d};return d;}
-function showToken(){$('tokenOverlay').classList.add('show');}
-$('tokenSave').onclick=()=>{TOKEN=$('tokenInput').value.trim();localStorage.setItem('mm_token',TOKEN);$('tokenOverlay').classList.remove('show');refresh();};
-$('logoutBtn').onclick=()=>{localStorage.removeItem('mm_token');TOKEN='';showToken();};
+  if(r.status===401){showLogin();throw{status:401,d};} if(!r.ok)throw{status:r.status,data:d};return d;}
+function showLogin(msg){const h=$('loginHint');if(msg){h.textContent=msg;h.style.display='block';}$('loginOverlay').classList.add('show');}
+async function doLogin(){
+  const password=$('pwInput').value,totp=$('totpInput').value;
+  try{
+    const r=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password,totp})});
+    const d=await r.json().catch(()=>({}));
+    if(!r.ok){showLogin(d.error||'login failed');return;}
+    $('pwInput').value='';$('totpInput').value='';$('loginHint').style.display='none';
+    $('loginOverlay').classList.remove('show');refresh();
+  }catch(e){showLogin('connection failed');}
+}
+$('loginBtn').onclick=doLogin;
+$('totpInput').addEventListener('keydown',e=>{if(e.key==='Enter')doLogin();});
+$('pwInput').addEventListener('keydown',e=>{if(e.key==='Enter')$('totpInput').focus();});
+$('logoutBtn').onclick=async()=>{try{await fetch('/api/logout',{method:'POST'});}catch(e){}showLogin();};
 function renderCursor(c){
   if(!c){return;}
   const t=$('cursorToggle');
@@ -292,20 +304,19 @@ function renderCursor(c){
   const h=$('cursorHint');
   if(!h) return;
   if(!c.enabled){
-    h.innerHTML='Off. Cursor’s cloud cannot reach a Tailscale IP — when you turn this on, follow the Funnel one-liner so they get a public HTTPS URL.';
+    h.innerHTML='Off. When on, authenticated clients (per-client keys, tailnet/loopback CIDRs) reach the loaded model at the base URL shown here.';
     return;
   }
-  const lan=esc('http://100.102.110.51:'+(c.port||8610)+'/v1');
   const pub=c.funnel_url?esc(c.funnel_url+'/v1'):'';
-  const key=esc(c.api_key||'');
   const model=esc(c.model||'spark[context=262k]');
-  h.innerHTML=`On. Cursor → Settings → Models → Override OpenAI Base URL <code>https://grace.tail1ed6b9.ts.net/v1</code> · API key <code>${key}</code> · custom model <code>${model}</code> (delete a plain <code>spark</code> entry — Cursor ignores /v1/models for the window; the <code>[context=…]</code> suffix is how it learns 262K). Funnel must be on 443.`;
+  const nkeys=c.keys||0;
+  h.innerHTML=`On. OpenAI-compatible gateway at <code>${esc(c.base_url||'')}</code> · ${nkeys} key(s) — create one on the server: <code>model-manager key create --name &lt;client&gt;</code> (printed once). Cursor profile keys get the <code>${model}</code> model id + Responses translation.`;
 }
 $('cursorToggle')?.addEventListener('change', async ev=>{
   const on=ev.target.checked;
   try{
     toast(on?'Publishing Cursor endpoint…':'Turning Cursor mode off…');
-    await api('/api/cursor',{method:'POST',body:{enabled:on}});
+    await api('/api/gateway',{method:'POST',body:{enabled:on}});
     refresh();
   }catch(e){
     toast('Cursor toggle failed: '+(e.data?.error||e.status),'err');
@@ -410,7 +421,6 @@ function item(m, familyModels){
   return el;
 }
 async function refresh(){
-  if(!TOKEN){showToken();return;}
   let st;try{st=await api('/api/state');}catch(e){if(e.status!==401)toast('Connection lost — retrying','err');return;}
   const mem=st.memory,pct=Math.min(100,Math.round(mem.used_mib*100/mem.total_mib));
   const f=$('memFill');f.style.width=pct+'%';f.className='fill'+(pct>=90?' hot':pct>=78?' warn':'');
@@ -561,5 +571,5 @@ $('confirmCancel').onclick=()=>$('confirmOverlay').classList.remove('show');
 $('confirmOk').onclick=async()=>{$('confirmOverlay').classList.remove('show');if(confirmAction)await confirmAction();};
 document.querySelectorAll('.overlay').forEach(o=>o.addEventListener('click',e=>{if(e.target===o)o.classList.remove('show');}));
 if(location.hostname)$('host').textContent=location.hostname;
-if(!TOKEN)showToken();refresh();setInterval(refresh,2500);
+refresh();setInterval(refresh,2500);
 </script>
