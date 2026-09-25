@@ -38,21 +38,12 @@ struct FailRec {
 }
 
 /// All mutable auth state, held in `AppState`.
+#[derive(Default)]
 pub struct AuthState {
     pub sessions: Mutex<HashMap<String, Session>>,
     fails: Mutex<HashMap<IpAddr, FailRec>>,
     /// Highest TOTP step already accepted (anti-replay).
     last_totp_step: Mutex<u64>,
-}
-
-impl Default for AuthState {
-    fn default() -> Self {
-        Self {
-            sessions: Mutex::new(HashMap::new()),
-            fails: Mutex::new(HashMap::new()),
-            last_totp_step: Mutex::new(0),
-        }
-    }
 }
 
 impl AuthState {

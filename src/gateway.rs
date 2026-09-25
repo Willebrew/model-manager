@@ -425,7 +425,7 @@ async fn proxy(State(state): State<SharedState>, req: Request) -> Response {
                 }
             }
         }
-        chunk.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+        chunk.map_err(|e| std::io::Error::other(e))
     });
 
     let mut builder = Response::builder().status(status.as_u16());
@@ -515,6 +515,7 @@ fn audit(
 }
 
 /// Append a trailing empty chunk that fires the audit line at stream end.
+#[allow(clippy::too_many_arguments)]
 fn audited_stream<S>(
     s: S,
     ctx: GwCtx,
