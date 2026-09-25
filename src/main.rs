@@ -1,5 +1,6 @@
 mod api;
 mod config;
+mod cursor;
 mod docker;
 mod gguf;
 mod memory;
@@ -67,7 +68,8 @@ async fn main() -> Result<()> {
         loading: Mutex::new(std::collections::HashMap::new()),
     });
 
-    let app = api::router(state);
+    let app = api::router(state.clone());
+    cursor::serve(state);
 
     let addr: SocketAddr = format!("{bind}:{port}").parse()?;
     let lan = lan_ip().unwrap_or_else(|| "127.0.0.1".to_string());

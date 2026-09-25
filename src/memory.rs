@@ -13,6 +13,14 @@ const MIB: u64 = 1024 * 1024;
 /// in the checkpoint size. Replaced by `measured_peak_mib` after a real load.
 const SPEECH_RUNTIME_MIB: u64 = 2560;
 
+/// Extra allowance (MiB) for an audio-generation server (flow-matching DiT,
+/// VAE decoder, CUDA graphs). Replaced by `measured_peak_mib` after a real load.
+const AUDIO_RUNTIME_MIB: u64 = 8192;
+
+/// Extra allowance (MiB) for TRELLIS.2-style image-to-3D: flow DiT, sparse VAE,
+/// nvdiffrast extract. Replaced by `measured_peak_mib` after a real load.
+const IMAGE3D_RUNTIME_MIB: u64 = 16384;
+
 #[derive(Serialize, Clone, Debug)]
 pub struct MemSnapshot {
     pub total_mib: u64,
@@ -56,8 +64,8 @@ pub fn estimate(model: &ModelDef, overhead_mib: u64, total_system_mib: u64) -> M
     let weights_mib = gguf::model_weight_bytes(path).map(|b| b / MIB).unwrap_or(0);
 
     // KV hyperparameters come from GGUF metadata (llama.cpp) or config.json (vLLM).
-    // Speech models (NeMo) have no KV cache — their footprint is weights plus a
-    // fixed PyTorch/cuDNN runtime allowance for audio feature and decode buffers.
+    // Speech / audio-gen models have no LLM KV cache — footprint is weights plus
+    // a fixed PyTorch/cuDNN (and for music, DiT/VAE) runtime allowance.
     if model.engine == Engine::Nemo || model.kind == ModelKind::Speech {
         let total = weights_mib + overhead_mib + SPEECH_RUNTIME_MIB;
         return MemEstimate {
@@ -69,11 +77,33 @@ pub fn estimate(model: &ModelDef, overhead_mib: u64, total_system_mib: u64) -> M
             note: Some("speech model: no KV cache; includes PyTorch runtime".into()),
         };
     }
+    if model.engine == Engine::Audiogen || model.kind == ModelKind::Audio {
+        let total = weights_mib + overhead_mib + AUDIO_RUNTIME_MIB;
+        return MemEstimate {
+            weights_mib,
+            kv_mib: 0,
+            overhead_mib: overhead_mib + AUDIO_RUNTIME_MIB,
+            total_mib: model.measured_peak_mib.unwrap_or(total),
+            measured: model.measured_peak_mib.is_some(),
+            note: Some("audio-gen model: no KV cache; includes DiT/VAE runtime".into()),
+        };
+    }
+    if model.engine == Engine::Trellis || model.kind == ModelKind::Image3d {
+        let total = weights_mib + overhead_mib + IMAGE3D_RUNTIME_MIB;
+        return MemEstimate {
+            weights_mib,
+            kv_mib: 0,
+            overhead_mib: overhead_mib + IMAGE3D_RUNTIME_MIB,
+            total_mib: model.measured_peak_mib.unwrap_or(total),
+            measured: model.measured_peak_mib.is_some(),
+            note: Some("image-to-3D model: no KV cache; includes DiT/VAE/o-voxel runtime".into()),
+        };
+    }
 
     let info = match model.engine {
         Engine::Llamacpp => gguf::resolve_gguf(path).and_then(|g| gguf::parse_metadata(&g)),
         Engine::Vllm => gguf::parse_hf_config(path),
-        Engine::Nemo => unreachable!("handled above"),
+        Engine::Nemo | Engine::Audiogen | Engine::Trellis => unreachable!("handled above"),
     };
     let (kv_mib, mut note) = match info {
         Ok(info) => (

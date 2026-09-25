@@ -308,21 +308,39 @@ fn parse_shard_name(name: &str) -> Option<(String, u32)> {
 
 /// Total weight bytes for a model path that may be a GGUF (single or sharded)
 /// file, or a HuggingFace-format directory (sum of *.safetensors/*.bin/*.gguf).
+fn is_weight_file(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|e| e.to_str()),
+        Some("safetensors" | "bin" | "gguf" | "pt" | "nemo")
+    )
+}
+
+/// Sum weight-file sizes under `dir`, following HF snapshot symlinks.
+/// Skips hidden / cache directories (`.cache`, `.git`).
+fn sum_weight_files(dir: &Path) -> Result<u64> {
+    let mut total = 0u64;
+    for entry in std::fs::read_dir(dir).with_context(|| format!("reading dir {}", dir.display()))? {
+        let entry = entry?;
+        let p = entry.path();
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with('.') {
+            continue;
+        }
+        let ft = entry.file_type()?;
+        if ft.is_dir() || (ft.is_symlink() && p.is_dir()) {
+            total += sum_weight_files(&p)?;
+        } else if is_weight_file(&p) {
+            // Follow symlinks (HF cache snapshots symlink into ../blobs).
+            total += std::fs::metadata(&p)?.len();
+        }
+    }
+    Ok(total)
+}
+
 pub fn model_weight_bytes(model_path: &Path) -> Result<u64> {
     if model_path.is_dir() {
-        let mut total = 0u64;
-        for entry in std::fs::read_dir(model_path)
-            .with_context(|| format!("reading dir {}", model_path.display()))?
-        {
-            let entry = entry?;
-            let p = entry.path();
-            if let Some(ext) = p.extension().and_then(|e| e.to_str()) {
-                if matches!(ext, "safetensors" | "bin" | "gguf" | "pt" | "nemo") {
-                    // Follow symlinks (HF cache snapshots symlink into ../blobs).
-                    total += std::fs::metadata(&p)?.len();
-                }
-            }
-        }
+        let total = sum_weight_files(model_path)?;
         if total == 0 {
             bail!(
                 "no weight files (*.safetensors/*.bin/*.gguf) in {}",
@@ -394,6 +412,20 @@ pub fn parse_hf_config(model_path: &Path) -> Result<GgufInfo> {
         embedding_length: hidden,
         context_length: getu("max_position_embeddings").unwrap_or(0),
     })
+}
+
+/// Native max context from the checkpoint (GGUF `context_length` or HF
+/// `max_position_embeddings`). None when the file has no usable value.
+pub fn native_context_len(model_path: &Path, engine: crate::config::Engine) -> Option<u32> {
+    use crate::config::Engine;
+    let info = match engine {
+        Engine::Llamacpp => resolve_gguf(model_path)
+            .ok()
+            .and_then(|g| parse_metadata(&g).ok()),
+        Engine::Vllm => parse_hf_config(model_path).ok(),
+        Engine::Nemo | Engine::Audiogen | Engine::Trellis => return None,
+    }?;
+    (info.context_length > 0).then_some(info.context_length as u32)
 }
 
 #[cfg(test)]

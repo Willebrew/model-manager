@@ -48,7 +48,9 @@ pub fn router(state: SharedState) -> Router {
         .route("/api/models/:name/load", post(load_model))
         .route("/api/models/:name/unload", post(unload_model))
         .route("/api/models/:name/autostart", post(set_autostart))
+        .route("/api/models/:name/context", post(set_context))
         .route("/api/models/:name/logs", get(model_logs))
+        .route("/api/cursor", get(get_cursor).post(post_cursor))
         .layer(from_fn_with_state(state.clone(), auth));
 
     Router::new()
@@ -184,6 +186,9 @@ struct ModelView {
     phase: Option<String>,
     /// Approximate load progress 0–99 (from memory allocated so far).
     load_pct: Option<u32>,
+    /// Native max context from GGUF / config.json, if known. UI uses this to
+    /// hide context-window chips the checkpoint cannot serve.
+    max_context: Option<u32>,
 }
 
 /// Determine the current load stage of a starting container by scanning its
@@ -242,6 +247,32 @@ async fn load_phase(docker: &Docker, def: &ModelDef) -> String {
                 "Starting…".into()
             }
         }
+        crate::config::Engine::Audiogen => {
+            if has("application startup complete") || has("uvicorn running") || has("serving on") {
+                "Starting API server".into()
+            } else if has("pipeline ready") || has("model ready") {
+                "Model ready".into()
+            } else if has("loading components") || has("loading pipeline") {
+                "Loading pipeline".into()
+            } else if has("loading model") {
+                "Loading weights".into()
+            } else {
+                "Starting…".into()
+            }
+        }
+        crate::config::Engine::Trellis => {
+            if has("application startup complete") || has("uvicorn running") || has("serving on") {
+                "Starting API server".into()
+            } else if has("pipeline ready") || has("model ready") {
+                "Model ready".into()
+            } else if has("loading pipeline") || has("from_pretrained") {
+                "Loading TRELLIS.2 pipeline".into()
+            } else if has("loading model") {
+                "Loading weights".into()
+            } else {
+                "Starting…".into()
+            }
+        }
     }
 }
 
@@ -250,6 +281,7 @@ struct StateView {
     memory: MemSnapshot,
     docker_ok: bool,
     models: Vec<ModelView>,
+    cursor: serde_json::Value,
 }
 
 async fn snapshot(state: &SharedState) -> MemSnapshot {
@@ -260,7 +292,8 @@ async fn snapshot(state: &SharedState) -> MemSnapshot {
 async fn model_healthy(state: &SharedState, port: u16) -> bool {
     let url = format!("http://127.0.0.1:{port}/health");
     matches!(
-        state.http.get(&url).timeout(Duration::from_millis(800)).send().await,
+        // SGLang /health runs a dummy generate (~1s with sleep-on-idle).
+        state.http.get(&url).timeout(Duration::from_millis(2500)).send().await,
         Ok(r) if r.status().is_success()
     )
 }
@@ -314,6 +347,12 @@ async fn get_state(State(state): State<SharedState>) -> impl IntoResponse {
             (None, None)
         };
 
+        let max_context = if def.uses_context() {
+            crate::gguf::native_context_len(std::path::Path::new(&def.model_path), def.engine)
+        } else {
+            None
+        };
+
         views.push(ModelView {
             running,
             state: st.map(|s| s.state.clone()).unwrap_or_else(|| "absent".into()),
@@ -323,15 +362,67 @@ async fn get_state(State(state): State<SharedState>) -> impl IntoResponse {
             oom,
             phase,
             load_pct,
+            max_context,
             def,
         });
     }
+
+    let cursor = {
+        let cfg = state.config.lock().await;
+        let ctx = views
+            .iter()
+            .find(|v| v.def.kind == crate::config::ModelKind::Llm && v.running && v.healthy)
+            .map(|v| v.def.context as u64)
+            .unwrap_or(262144);
+        crate::cursor::snapshot(
+            cfg.cursor.enabled,
+            cfg.cursor.port,
+            &cfg.cursor.model_alias,
+            &cfg.server.token,
+            ctx,
+        )
+    };
 
     Json(StateView {
         memory: mem,
         docker_ok,
         models: views,
+        cursor,
     })
+}
+
+async fn get_cursor(State(state): State<SharedState>) -> impl IntoResponse {
+    let (enabled, port, alias, token, ctx) = {
+        let cfg = state.config.lock().await;
+        let ctx = cfg
+            .models
+            .iter()
+            .find(|m| m.kind == crate::config::ModelKind::Llm)
+            .map(|m| m.context as u64)
+            .unwrap_or(262144);
+        (
+            cfg.cursor.enabled,
+            cfg.cursor.port,
+            cfg.cursor.model_alias.clone(),
+            cfg.server.token.clone(),
+            ctx,
+        )
+    };
+    Json(crate::cursor::snapshot(enabled, port, &alias, &token, ctx))
+}
+
+async fn post_cursor(
+    State(state): State<SharedState>,
+    Json(body): Json<crate::cursor::CursorToggle>,
+) -> impl IntoResponse {
+    match crate::cursor::set_enabled(state, body.enabled).await {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e})),
+        )
+            .into_response(),
+    }
 }
 
 #[derive(Deserialize)]
@@ -347,8 +438,10 @@ async fn upsert_model(
     if body.model.name.trim().is_empty() {
         return (StatusCode::BAD_REQUEST, Json(json!({"error": "name required"}))).into_response();
     }
+    let mut model = body.model;
+    model.sync_context_into_launch();
     let mut cfg = state.config.lock().await;
-    cfg.upsert(body.model);
+    cfg.upsert(model);
     if let Err(e) = cfg.save() {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -577,6 +670,154 @@ async fn set_autostart(
         }
     }
     Json(json!({"ok": true, "autostart": body.enabled, "applied": exists})).into_response()
+}
+
+#[derive(Deserialize)]
+struct ContextBody {
+    context: u32,
+    /// If true and the model is running, unload and reload so the new window
+    /// takes effect. If the model is stopped, the value is just persisted.
+    #[serde(default)]
+    reload: bool,
+    #[serde(default)]
+    force: bool,
+}
+
+async fn set_context(
+    State(state): State<SharedState>,
+    Path(name): Path<String>,
+    Json(body): Json<ContextBody>,
+) -> impl IntoResponse {
+    if body.context == 0 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "context must be > 0"})),
+        )
+            .into_response();
+    }
+
+    let (def, overhead, safety, old_ctx) = {
+        let mut cfg = state.config.lock().await;
+        match cfg.find_mut(&name) {
+            Some(m) => {
+                if !m.uses_context() {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({"error": "this model has no selectable context window"})),
+                    )
+                        .into_response();
+                }
+                let old = m.context;
+                m.context = body.context;
+                // llama.cpp KV grows with context; drop a stale measurement so
+                // the next load re-estimates. vLLM sizes KV from gpu_mem_util.
+                if m.engine == crate::config::Engine::Llamacpp && body.context > old {
+                    m.measured_peak_mib = None;
+                }
+                m.sync_context_into_launch();
+                let d = m.clone();
+                if let Err(e) = cfg.save() {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({"error": format!("save failed: {e}")})),
+                    )
+                        .into_response();
+                }
+                (
+                    d,
+                    cfg.server.overhead_mib,
+                    cfg.server.safety_margin_mib,
+                    old,
+                )
+            }
+            None => {
+                return (StatusCode::NOT_FOUND, Json(json!({"error": "unknown model"})))
+                    .into_response()
+            }
+        }
+    };
+
+    let running = docker::status_of(&state.docker, &def)
+        .await
+        .ok()
+        .flatten()
+        .map(|s| s.running)
+        .unwrap_or(false);
+
+    if !body.reload || !running {
+        return Json(json!({
+            "ok": true,
+            "context": def.context,
+            "previous": old_ctx,
+            "reloaded": false,
+            "running": running,
+        }))
+        .into_response();
+    }
+
+    // Free this model's reservation before the OOM check / relaunch.
+    state.loading.lock().await.remove(&name);
+    if let Err(e) = docker::unload(&state.docker, &def).await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("unload failed: {e}")})),
+        )
+            .into_response();
+    }
+
+    let baseline = snapshot(&state).await;
+    let estimate = memory::estimate(&def, overhead, baseline.total_mib);
+    let oom = memory::oom_check(estimate.total_mib, &baseline, safety);
+    if oom.would_oom && !body.force {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": "would_oom",
+                "message": format!(
+                    "Reloading '{}' at {} ctx needs ~{} MiB but only {} MiB is available. Model was unloaded.",
+                    def.name, def.context, oom.needed_mib, oom.available_mib
+                ),
+                "estimate": estimate,
+                "oom": oom,
+                "context": def.context,
+                "unloaded": true,
+            })),
+        )
+            .into_response();
+    }
+
+    if let Err(e) = docker::load(&state.docker, &def).await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("reload failed: {e}")})),
+        )
+            .into_response();
+    }
+
+    {
+        let mut lg = state.loading.lock().await;
+        lg.insert(
+            def.name.clone(),
+            LoadInfo {
+                baseline_used_mib: baseline.used_mib,
+                estimate_mib: estimate.total_mib,
+            },
+        );
+    }
+    spawn_measure(state.clone(), def.clone(), baseline.available_mib);
+
+    (
+        StatusCode::OK,
+        Json(json!({
+            "ok": true,
+            "context": def.context,
+            "previous": old_ctx,
+            "reloaded": true,
+            "estimate": estimate,
+            "forced": body.force,
+        })),
+    )
+        .into_response()
 }
 
 async fn model_logs(

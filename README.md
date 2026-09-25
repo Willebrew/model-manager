@@ -17,7 +17,7 @@ On a 128 GB Spark a single 4-bit 200B-class model can occupy ~117 GB. Load a sec
 ## Features
 
 - 🌐 **Web dashboard over HTTPS** bound to your LAN — open it from your laptop, phone, anything (self-signed cert auto-generated on first run).
-- 🧩 **Two engines**: run **llama.cpp** (GGUF) or **vLLM** (HuggingFace-format) models — pick per model.
+- 🧩 **Four engines**: **llama.cpp** (GGUF), **vLLM** (HuggingFace LLMs), **NeMo** (ASR + diarization), and **AudioGen** (text-to-music / TTS via `/v1/audio/speech`).
 - 📊 **Live memory gauge** (RAM + swap) and per-model status (running / loading / stopped / won't-fit).
 - 🧠 **Memory estimator** with a measured-peak cache, so estimates get exact after first run.
 - 🛑 **OOM guard** — a load that won't fit is blocked with a clear explanation; override with one click if you really mean it.
@@ -29,7 +29,9 @@ On a 128 GB Spark a single 4-bit 200B-class model can occupy ~117 GB. Load a sec
 ## How it works
 
 Each registered model is launched as a Docker container running its engine's
-OpenAI-compatible server — llama.cpp's `llama-server` or vLLM's API server.
+OpenAI-compatible server — llama.cpp's `llama-server`, vLLM's API server,
+the NeMo speech server (`/v1/audio/transcriptions`), or the AudioGen server
+(`/v1/audio/speech`).
 Model Manager talks to the Docker daemon directly (via the socket), mounts the
 model read-only at `/model`, and passes through `--gpus all` + the NVIDIA
 runtime. The dashboard polls the daemon and the system for live state.
@@ -120,6 +122,17 @@ host_port = 18081
 context = 32768
 gpu_mem_util = 0.90
 extra_args = ["--tensor-parallel-size", "1"]
+autostart = false
+
+# Text-to-music (MiniMax Music 3) — image built from docker/music3
+[[models]]
+name = "minimax-music3"
+kind = "audio"
+engine = "audiogen"
+description = "MiniMax Music 3 text-to-music, up to 5 min, 32 kHz stereo"
+model_path = "/home/you/models/minimax-music3"
+image = "music3-spark:latest"
+host_port = 8008
 autostart = false
 ```
 

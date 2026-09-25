@@ -31,6 +31,9 @@ WORKDIR /app
 # Unbuffered so Model Manager can read load-progress markers from the log.
 ENV PYTHONUNBUFFERED=1 \
     HF_HOME=/cache/hf \
-    NEMO_CACHE_DIR=/cache/nemo
+    NEMO_CACHE_DIR=/cache/nemo \
+    HF_HUB_OFFLINE=1 \
+    TRANSFORMERS_OFFLINE=1 \
+    HF_HUB_DISABLE_TELEMETRY=1
 
 ENTRYPOINT ["python3", "/app/server.py"]

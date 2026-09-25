@@ -18,6 +18,33 @@ use std::path::Path;
 pub const LLAMA_SERVER_BIN: &str = "/opt/llama.cpp/build-cuda/bin/llama-server";
 const SHM_SIZE: i64 = 64 * 1024 * 1024 * 1024; // 64 GiB
 
+/// Hub/network defaults injected into every model container. Weights live on
+/// this machine — a load must not ping Hugging Face. These always win over
+/// per-model env (a card cannot turn offline mode off).
+const OFFLINE_ENV: &[&str] = &[
+    "HF_HUB_OFFLINE=1",
+    "TRANSFORMERS_OFFLINE=1",
+    "HF_DATASETS_OFFLINE=1",
+    "HF_HUB_DISABLE_TELEMETRY=1",
+    "HF_HUB_DISABLE_XET=1",
+];
+
+fn offline_env(model: &ModelDef) -> Vec<String> {
+    let mut env: Vec<String> = model
+        .env
+        .iter()
+        .cloned()
+        .filter(|e| {
+            !OFFLINE_ENV.iter().any(|d| {
+                let key = d.split_once('=').map(|(k, _)| k).unwrap_or(d);
+                e.starts_with(&format!("{key}="))
+            })
+        })
+        .collect();
+    env.extend(OFFLINE_ENV.iter().map(|s| (*s).to_string()));
+    env
+}
+
 pub fn connect() -> Result<Docker> {
     Docker::connect_with_local_defaults().context("connecting to Docker daemon (is it running, and are you in the `docker` group?)")
 }
@@ -187,14 +214,17 @@ pub async fn load(docker: &Docker, model: &ModelDef) -> Result<()> {
         if model.autostart { "unless-stopped" } else { "no" }.to_string(),
     );
 
+    let entrypoint = if model.entrypoint.is_empty() {
+        None
+    } else {
+        Some(model.entrypoint.clone())
+    };
+
     let config = Config {
         image: Some(image),
         cmd,
-        env: if model.env.is_empty() {
-            None
-        } else {
-            Some(model.env.clone())
-        },
+        entrypoint,
+        env: Some(offline_env(model)),
         labels: Some(labels),
         host_config: Some(host_config),
         ..Default::default()
