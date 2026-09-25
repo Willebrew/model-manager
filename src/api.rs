@@ -967,7 +967,7 @@ mod tests {
     use super::*;
     use axum::body::Body;
     use axum::http::Request;
-    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::net::{Ipv4Addr, SocketAddr};
     use tower::ServiceExt;
 
     fn state() -> SharedState {
