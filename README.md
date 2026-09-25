@@ -191,7 +191,7 @@ the `mm_session` cookie, or `X-MM-Admin` from a loopback peer.
 The dashboard controls processes on your machine and binds to your LAN by
 default is loopback. It serves **HTTPS** with an auto-generated self-signed cert
 (your browser warns once — click through, or import the cert from
-`~/.config/model-manager/cert.pem`). Login is Argon2id password + optional TOTP;
+`~/.config/model-manager/cert.pem`). Login is Argon2id password + TOTP (both required; the TOTP secret is set up once from the CLI).
 the TOTP secret is stored AES-256-GCM-encrypted under
 `~/.config/model-manager/secret.key` (0600). Note this protects config *copies
 and backups* — a compromise of the running user still yields the key file. For

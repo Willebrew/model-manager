@@ -291,11 +291,77 @@ pub fn base32(data: &[u8]) -> String {
 }
 
 pub fn totp_uri(secret: &[u8]) -> String {
+    let host = std::fs::read_to_string("/proc/sys/kernel/hostname")
+        .map(|h| h.trim().to_string())
+        .unwrap_or_else(|_| "model-manager".into());
+    let host = if host.is_empty() { "model-manager".into() } else { host };
     format!(
-        "otpauth://totp/model-manager:grace?secret={}&issuer=model-manager&digits=6&period={}",
+        "otpauth://totp/model-manager:{host}?secret={}&issuer=model-manager&digits=6&period={}",
         base32(secret),
         TOTP_STEP
     )
+}
+
+/// Remove `token = "…"` lines from config.toml backups/siblings next to the
+/// live config (`config.toml.bak-*`, `config.toml.*`). Rewrites each file in
+/// place at 0600. Returns the number of files scrubbed.
+pub fn scrub_token_siblings() -> Result<usize> {
+    let dir = crate::config::Config::dir();
+    let live = crate::config::Config::path();
+    let mut n = 0;
+    for entry in std::fs::read_dir(&dir).with_context(|| format!("reading {}", dir.display()))? {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.is_file() || path == live {
+            continue;
+        }
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !name.starts_with("config.toml.") && name != "config.toml.bak" {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let kept: Vec<&str> = text
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("token"))
+            .collect();
+        if kept.len() != text.lines().count() {
+            let mut out = kept.join("
+");
+            if text.ends_with('\n') {
+                out.push('\n');
+            }
+            std::fs::write(&path, out).with_context(|| format!("writing {}", path.display()))?;
+            n += 1;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).ok();
+        }
+    }
+    Ok(n)
+}
+
+/// chmod 0600 every file in the config dir (cert/key/config/backups).
+pub fn lockdown_config_dir() -> Result<usize> {
+    let dir = crate::config::Config::dir();
+    let mut n = 0;
+    for entry in std::fs::read_dir(&dir)? {
+        let entry = entry?;
+        if !entry.path().is_file() {
+            continue;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(entry.path(), std::fs::Permissions::from_mode(0o600)).ok();
+            n += 1;
+        }
+    }
+    Ok(n)
 }
 
 // ---------- API keys ----------
@@ -431,6 +497,24 @@ mod tests {
         let blob = seal(&key, b"totp-secret").unwrap();
         assert_eq!(open(&key, &blob).unwrap(), b"totp-secret");
         assert!(open(&[8u8; 32], &blob).is_err());
+    }
+
+    #[test]
+    fn scrub_removes_token_lines() {
+        let dir = std::env::temp_dir().join(format!("mm-scrub-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("MODEL_MANAGER_CONFIG", dir.join("config.toml"));
+        let bak = dir.join("config.toml.bak-1");
+        std::fs::write(&bak, "[server]\ntoken = \"SECRET\"\nport = 8600\n").unwrap();
+        let keep = dir.join("unrelated.txt");
+        std::fs::write(&keep, "token = \"x\"\n").unwrap();
+        assert_eq!(scrub_token_siblings().unwrap(), 1);
+        let after = std::fs::read_to_string(&bak).unwrap();
+        assert!(!after.contains("SECRET"));
+        assert!(after.contains("port = 8600"));
+        // Non-config siblings untouched.
+        assert!(std::fs::read_to_string(&keep).unwrap().contains("token"));
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

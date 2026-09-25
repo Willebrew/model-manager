@@ -232,26 +232,28 @@ async fn login(
         )
             .into_response();
     };
+    let Some(totp_enc) = totp_enc else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "no TOTP configured — run `model-manager setup-totp` on the server"})),
+        )
+            .into_response();
+    };
     let pw_ok = crate::auth::verify_password(&hash, &body.password);
-    // TOTP only enforced once configured; before that password alone works so
-    // first-run setup can complete from the dashboard.
-    let totp_ok = match &totp_enc {
-        None => true,
-        Some(enc) => {
-            let secret = crate::auth::secret_key()
-                .and_then(|k| crate::auth::open(&k, enc))
-                .unwrap_or_default();
-            if secret.is_empty() {
-                false
-            } else {
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs();
-                match crate::auth::verify_totp(&secret, &body.totp, now) {
-                    Some(step) => state.auth.claim_totp_step(step),
-                    None => false,
-                }
+    let totp_ok = {
+        let secret = crate::auth::secret_key()
+            .and_then(|k| crate::auth::open(&k, &totp_enc))
+            .unwrap_or_default();
+        if secret.is_empty() {
+            false
+        } else {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            match crate::auth::verify_totp(&secret, &body.totp, now) {
+                Some(step) => state.auth.claim_totp_step(step),
+                None => false,
             }
         }
     };
@@ -1024,6 +1026,23 @@ mod tests {
         );
         let resp = app.oneshot(r).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn login_503_without_totp() {
+        let st = state();
+        {
+            let mut cfg = st.config.lock().await;
+            cfg.server.password_hash =
+                Some(crate::auth::hash_password("pw").unwrap());
+        }
+        let app = router(st);
+        let mut r = req("/api/login", "POST");
+        r.headers_mut()
+            .insert("content-type", "application/json".parse().unwrap());
+        *r.body_mut() = Body::from(r#"{"password":"pw","totp":"000000"}"#);
+        let resp = app.oneshot(r).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[tokio::test]

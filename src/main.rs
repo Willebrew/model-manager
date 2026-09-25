@@ -255,6 +255,16 @@ fn set_password(config: &mut config::Config) -> Result<()> {
         println!("removed plaintext [server] token from config");
     }
     config.save()?;
+    // Scrub the token out of old config backups and lock down the dir.
+    match auth::scrub_token_siblings() {
+        Ok(0) => {}
+        Ok(n) => println!("scrubbed plaintext token from {n} config backup file(s)"),
+        Err(e) => eprintln!("warning: backup token scrub failed: {e}"),
+    }
+    match auth::lockdown_config_dir() {
+        Ok(n) => println!("set mode 0600 on {n} file(s) in {}", config::Config::dir().display()),
+        Err(e) => eprintln!("warning: chmod 600 failed: {e}"),
+    }
     println!("password set (argon2id). TOTP: run `model-manager setup-totp`.");
     Ok(())
 }
